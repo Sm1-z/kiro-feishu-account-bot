@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+boto3==1.35.92
+botocore==1.35.92
+PyJWT==2.10.1
+pypinyin==0.53.0
+lark-oapi==1.4.15
+httpx==0.28.1

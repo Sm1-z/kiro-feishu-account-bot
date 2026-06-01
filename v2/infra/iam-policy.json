@@ -1,0 +1,56 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IdentityStoreUserAndGroup",
+      "Effect": "Allow",
+      "Action": [
+        "identitystore:CreateUser",
+        "identitystore:DescribeUser",
+        "identitystore:GetUserId",
+        "identitystore:ListUsers",
+        "identitystore:DeleteUser",
+        "identitystore:CreateGroupMembership",
+        "identitystore:GetGroupId",
+        "identitystore:ListGroups",
+        "identitystore:ListGroupMembershipsForMember"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsoAdminReadInstance",
+      "Effect": "Allow",
+      "Action": ["sso:ListInstances"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KiroSubscription",
+      "Effect": "Allow",
+      "Action": [
+        "q:CreateAssignment",
+        "q:UpdateAssignment",
+        "q:DeleteAssignment",
+        "user-subscriptions:ListUserSubscriptions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DynamoDBMappingTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/kiro-account-mapping",
+        "arn:aws:dynamodb:*:*:table/kiro-account-mapping/index/*"
+      ]
+    }
+  ]
+}

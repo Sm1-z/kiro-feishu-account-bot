@@ -1,0 +1,82 @@
+"""管理员路由：Web 审批（与飞书卡片审批同源）+ 用户/账号管理。
+
+审批走与 feishu_ws 相同的 ApprovalService（防重 + 异步执行），保证两个入口一致。
+"""
+from __future__ import annotations
+
+import threading
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.approval import ApprovalService
+from app.auth import CurrentUser, require_admin
+from app.mapping_store import MappingStore
+from app.request_store import RequestStore
+from app.schemas import ManualLinkIn, ReviewIn
+
+router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _run_execution(request_id: str, reviewer_name: str):
+    svc = ApprovalService()
+    req = svc.execute_approved(request_id)
+    if req:
+        svc.notify_after_execution(req, reviewer_name)
+
+
+@router.get("/requests")
+def list_requests(status: str | None = None, _: CurrentUser = Depends(require_admin)):
+    return [r.__dict__ for r in RequestStore().list_by_status(status)]
+
+
+@router.post("/requests/{request_id}/approve")
+def approve(request_id: str, admin: CurrentUser = Depends(require_admin)):
+    svc = ApprovalService()
+    if not svc.claim_approve(request_id, admin.open_id):
+        raise HTTPException(409, "该申请已被处理")
+    # 后台执行 AWS 开通（与飞书卡片审批一致）
+    threading.Thread(target=_run_execution, args=(request_id, admin.name),
+                     daemon=True).start()
+    return {"request_id": request_id, "status": "approved", "message": "已受理，正在执行"}
+
+
+@router.post("/requests/{request_id}/reject")
+def reject(request_id: str, body: ReviewIn, admin: CurrentUser = Depends(require_admin)):
+    svc = ApprovalService()
+    if not svc.claim_reject(request_id, admin.open_id, body.comment):
+        raise HTTPException(409, "该申请已被处理")
+    req = svc.requests.get(request_id)
+    if req:
+        svc.notify_after_execution(req, admin.name)  # 通知申请人被拒
+    return {"request_id": request_id, "status": "rejected"}
+
+
+@router.get("/users")
+def list_users(_: CurrentUser = Depends(require_admin)):
+    """全量映射（飞书用户 → 账号）。前端按 feishu_open_id 聚合展示一人多账号。"""
+    store = MappingStore()
+    items, kwargs = [], {}
+    while True:
+        resp = store._table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return items
+
+
+@router.post("/link")
+def manual_link(body: ManualLinkIn, _: CurrentUser = Depends(require_admin)):
+    from app.resolver import Resolver
+    m = Resolver().manual_link(
+        kiro_user_id=body.kiro_user_id, feishu_open_id=body.feishu_open_id,
+        feishu_name=body.feishu_name, kiro_username=body.kiro_username,
+        kiro_email=body.kiro_email, tier=body.tier,
+    )
+    return m.__dict__
+
+
+@router.delete("/mappings/{kiro_user_id}")
+def unlink(kiro_user_id: str, _: CurrentUser = Depends(require_admin)):
+    MappingStore().delete(kiro_user_id)
+    return {"deleted": kiro_user_id}

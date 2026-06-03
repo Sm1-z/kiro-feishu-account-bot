@@ -1,6 +1,21 @@
 # v2 真机部署与飞书联调清单
 
 > 从零到端到端跑通的操作清单。按顺序执行，每步带验证点。
+>
+> ✅ **首次联调已于 2026-06-03 跑通**（账号 <ACCOUNT_ID> + 本地 uvicorn + 飞书应用「Kiro」），
+> 五落点全验证：IDC 用户 / 加组 / Kiro 订阅 / DynamoDB 映射 / 密码邮件。下方「踩坑速查」是当时实际卡点。
+
+## ⚠️ 踩坑速查（首次联调实录，复用必看）
+
+| 现象 | 根因 | 解法 |
+|------|------|------|
+| OAuth 报 **20029 重定向 URL 有误** | 飞书后台没加重定向 URL | 安全设置→重定向 URL 加 `http://localhost:8000/api/auth/feishu/callback`（一字不差，http、无尾斜杠） |
+| callback 跳转后 **404 Not Found** | BrowserRouter 客户端路由（/auth/callback、/admin）走 StaticFiles 找不到文件 | 已修：main.py SPA fallback（commit e83f234） |
+| 申请提交报 **99992351 id not exist** | `ADMIN_OPEN_IDS` 还是占位符 | 登录后从 /api/auth/me 取真实 ou_ open_id 回填 .env 重启 |
+| 点卡片按钮 **无权操作 / code 200873**，后端零回调 | 事件/回调订阅方式指向废弃的开发者服务器 API Gateway | 「事件配置」**和**「回调配置」**两个都**切「使用长连接接收回调」 |
+| 长连接收到事件但 **卡片回调仍 processor not found** | 订阅的是旧版 `card.action.trigger_v1`，与 SDK `register_p2_card_action_trigger`（新版）结构不匹配 | 回调里删旧版、添加新版 `card.action.trigger`，重新发版 |
+| 卡片回调到达但 **do_without_validation 报错** | lark-oapi 1.4.15 该方法名无前导下划线 | 已修：feishu_ws.py（commit e83f234） |
+| `uvicorn[standard]` 装不上（watchfiles not found） | 平台/源问题 | 装基础版 `uvicorn==0.34.0` 即可，联调不需要热重载 |
 
 ---
 

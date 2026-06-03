@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     mapping_table_name: str = Field(default="kiro-account-mapping")
     mapping_gsi_name: str = Field(default="feishu_open_id-index")
 
+    # ---- Kiro 用量分析（对接 Analytics Dashboard，Athena 只读）----
+    # 留空则用量功能自动关闭（管理页用量列显示 —），不影响其它功能
+    athena_database: str = Field(default="")
+    athena_output_bucket: str = Field(default="")
+    glue_table_name: str = Field(default="")  # 空则从 Glue 库自动发现首张表
+
     # ---- 账号配额 ----
     default_account_quota: int = Field(default=2)
 

@@ -49,7 +49,40 @@
       ],
       "Resource": [
         "arn:aws:dynamodb:*:*:table/kiro-account-mapping",
-        "arn:aws:dynamodb:*:*:table/kiro-account-mapping/index/*"
+        "arn:aws:dynamodb:*:*:table/kiro-account-mapping/index/*",
+        "arn:aws:dynamodb:*:*:table/kiro-account-mapping-requests",
+        "arn:aws:dynamodb:*:*:table/kiro-account-mapping-requests/index/*"
+      ]
+    },
+    {
+      "Sid": "KiroUsageAnalyticsRead",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:StopQueryExecution",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetDatabase",
+        "glue:GetPartitions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KiroUsageAnalyticsS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::kiro-user-activity-*",
+        "arn:aws:s3:::kiro-user-activity-*/*",
+        "arn:aws:s3:::kiro-user-report-dashboard-athena-results-*",
+        "arn:aws:s3:::kiro-user-report-dashboard-athena-results-*/*"
       ]
     }
   ]

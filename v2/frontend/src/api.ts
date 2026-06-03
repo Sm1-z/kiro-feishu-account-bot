@@ -63,4 +63,23 @@ export const approve = (id: string) => api.post(`/api/admin/requests/${id}/appro
 export const reject = (id: string, comment = '') =>
   api.post(`/api/admin/requests/${id}/reject`, { comment })
 
+export interface AccountRow {
+  kiro_user_id: string
+  feishu_open_id: string
+  feishu_name: string
+  kiro_username: string
+  kiro_email: string
+  team: string
+  tier: string
+  status: string
+  account_role: string
+  usage_messages: number | null
+  usage_credits: number | null
+  usage_conversations: number | null
+  usage_last_active: string | null
+  usage_active_days: number | null
+}
+export const getAccounts = () =>
+  api.get<AccountRow[]>('/api/admin/accounts').then((r) => r.data)
+
 export default api

@@ -65,6 +65,49 @@ def list_users(_: CurrentUser = Depends(require_admin)):
     return items
 
 
+@router.get("/accounts")
+def list_accounts(_: CurrentUser = Depends(require_admin)):
+    """账号总览：全量映射 + JOIN Kiro 用量（对接 Analytics Dashboard）。
+
+    关联键 = kiro_user_id = Athena 表 userid。用量在应用层拼接，
+    Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
+    """
+    from app.usage import get_usage_by_user
+
+    store = MappingStore()
+    items, kwargs = [], {}
+    while True:
+        resp = store._table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    usage = get_usage_by_user()  # {userid: {...}}，失败返回 {}
+    out = []
+    for it in items:
+        uid = it.get("kiro_user_id", "")
+        u = usage.get(uid)
+        out.append({
+            "kiro_user_id": uid,
+            "feishu_open_id": it.get("feishu_open_id", ""),
+            "feishu_name": it.get("feishu_name", ""),
+            "kiro_username": it.get("kiro_username", ""),
+            "kiro_email": it.get("kiro_email", ""),
+            "team": it.get("team", ""),
+            "tier": it.get("tier", ""),
+            "status": it.get("status", ""),
+            "account_role": it.get("account_role", ""),
+            # 用量（None = 无数据/未配置；0 = 有数据但未使用，前端可区分）
+            "usage_messages": u["messages"] if u else None,
+            "usage_credits": round(u["credits"], 2) if u else None,
+            "usage_conversations": u["conversations"] if u else None,
+            "usage_last_active": u["last_active"] if u else None,
+            "usage_active_days": u["active_days"] if u else None,
+        })
+    return out
+
+
 @router.post("/link")
 def manual_link(body: ManualLinkIn, _: CurrentUser = Depends(require_admin)):
     from app.resolver import Resolver

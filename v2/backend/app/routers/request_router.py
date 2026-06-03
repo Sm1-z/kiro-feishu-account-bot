@@ -102,3 +102,29 @@ def quota_increase(body: QuotaIn, user: CurrentUser = Depends(current_user)):
 @router.get("/mine")
 def mine(user: CurrentUser = Depends(current_user)):
     return [r.__dict__ for r in RequestStore().list_by_user(user.open_id)]
+
+
+@router.get("/groups")
+def groups(_: CurrentUser = Depends(current_user)):
+    """可申请的分组：从 IDC 动态拉取 list_groups。
+
+    避免前端写死组名（换客户/环境无需改代码重新 build）。失败时降级为
+    配置里的默认组，保证申请表单仍可用。
+    """
+    from app.aws import get_identity_store_id, get_session
+    try:
+        session = get_session()
+        id_store = get_identity_store_id(session)
+        idc = session.client("identitystore", region_name=settings.aws_region)
+        names, kwargs = [], {"IdentityStoreId": id_store}
+        while True:
+            resp = idc.list_groups(**kwargs)
+            names.extend(g["DisplayName"] for g in resp.get("Groups", []))
+            token = resp.get("NextToken")
+            if not token:
+                break
+            kwargs["NextToken"] = token
+        return sorted(names)
+    except Exception:
+        logger.exception("拉取 IDC 分组失败，降级为默认组")
+        return [settings.kiro_group_name] if settings.kiro_group_name else []

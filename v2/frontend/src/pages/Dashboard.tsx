@@ -5,7 +5,7 @@ import {
   Typography, Layout, Empty,
 } from 'antd'
 import {
-  getMe, applyAccount, upgradeAccount, myRequests, Me, Account, ReqItem,
+  getMe, applyAccount, upgradeAccount, myRequests, getGroups, Me, Account, ReqItem,
 } from '../api'
 
 const { Header, Content } = Layout
@@ -15,12 +15,6 @@ const TIER_OPTS = [
   { value: 'pro', label: 'Kiro Pro ($20)' },
   { value: 'pro+', label: 'Kiro Pro+ ($40)' },
   { value: 'power', label: 'Kiro Power ($200)' },
-]
-const GROUP_OPTS = [
-  { value: 'team-a', label: 'team-a（海外开发）' },
-  { value: 'PM', label: 'PM（海外产品）' },
-  { value: 'team-b', label: 'team-b（team-b团队）' },
-  { value: 'Q', label: 'Q' },
 ]
 const roleTag = (r: string) =>
   r === 'primary' ? <Tag color="gold">主账号</Tag> : <Tag>副账号</Tag>
@@ -33,6 +27,7 @@ export default function Dashboard() {
   const [reqs, setReqs] = useState<ReqItem[]>([])
   const [applyOpen, setApplyOpen] = useState(false)
   const [upgradeTarget, setUpgradeTarget] = useState<Account | null>(null)
+  const [groups, setGroups] = useState<string[]>([])
   const [form] = Form.useForm()
   const [upForm] = Form.useForm()
 
@@ -44,6 +39,8 @@ export default function Dashboard() {
     } catch { message.error('加载失败') }
   }
   useEffect(() => { load() }, [])
+  // 分组从 IDC 动态拉取（失败时后端已降级为默认组）
+  useEffect(() => { getGroups().then(setGroups).catch(() => setGroups([])) }, [])
 
   const quotaFull = me ? me.accounts.filter(a => a.status === 'active').length >= me.quota : false
 
@@ -137,7 +134,11 @@ export default function Dashboard() {
             <Form.Item name="family_name" label="Family Name"><Input placeholder="姓" /></Form.Item>
           </Space>
           <Form.Item name="group" label="分组" rules={[{ required: true }]}>
-            <Select options={GROUP_OPTS} placeholder="选择团队分组" />
+            <Select
+              options={groups.map((g) => ({ value: g, label: g }))}
+              placeholder="选择团队分组"
+              notFoundContent="加载分组中…"
+            />
           </Form.Item>
           <Form.Item name="tier" label="套餐" rules={[{ required: true }]} initialValue="pro">
             <Select options={TIER_OPTS} />

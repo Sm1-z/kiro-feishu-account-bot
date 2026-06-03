@@ -51,8 +51,26 @@ def _startup():
         logger.info("未配置飞书凭证，跳过 WS 长连接启动")
 
 
-# 托管前端构建产物（可选）
+# 托管前端构建产物（可选）。
+# 前端是 BrowserRouter（history 模式），/auth/callback、/admin 等是客户端路由，
+# 磁盘上无对应文件。StaticFiles 默认会对这些路径返回 404，故需 SPA fallback：
+# 真实静态资源走 StaticFiles，其余非 /api 路径一律回退 index.html 交前端路由处理。
 _static = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(_static):
+    from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
-    app.mount("/", StaticFiles(directory=_static, html=True), name="static")
+
+    # 静态资源（js/css/图片等）挂在 /assets
+    _assets = os.path.join(_static, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    _index = os.path.join(_static, "index.html")
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        # /api/* 已由上面的路由处理；走到这里的非 api 路径一律回退 SPA 入口
+        candidate = os.path.join(_static, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(_index)

@@ -56,6 +56,7 @@ export const applyAccount = (data: any) => api.post('/api/requests/apply', data)
 export const upgradeAccount = (data: any) => api.post('/api/requests/upgrade', data)
 export const quotaIncrease = (data: any) => api.post('/api/requests/quota-increase', data)
 export const myRequests = () => api.get<ReqItem[]>('/api/requests/mine').then((r) => r.data)
+export const getGroups = () => api.get<string[]>('/api/requests/groups').then((r) => r.data)
 export const adminRequests = (status?: string) =>
   api.get<ReqItem[]>('/api/admin/requests', { params: { status } }).then((r) => r.data)
 export const approve = (id: string) => api.post(`/api/admin/requests/${id}/approve`)

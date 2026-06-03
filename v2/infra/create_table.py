@@ -1,12 +1,16 @@
-"""创建 DynamoDB 映射表 kiro-account-mapping。
+"""创建 DynamoDB 表：映射表 + 申请/审批表。
 
-用法（凭证走 IAM Role / aws sso）：
+用法（凭证走 IAM Role / aws sso / 本地 default profile）：
     python infra/create_table.py
 
 表结构（设计 06-data-layer.md）：
+  kiro-account-mapping
     PK:  kiro_user_id (S)
     GSI: feishu_open_id-index  HASH=feishu_open_id (S)
-    计费: PAY_PER_REQUEST（按量，此数据量月费 ≈ $0）
+  kiro-account-mapping-requests（申请/审批 + 审计日志，设计 04 A4）
+    PK:  request_id (S)
+    GSI: user_open_id-index  HASH=user_open_id (S)  —— 免 list_by_user 全表 scan
+  计费: PAY_PER_REQUEST（按量，此数据量月费 ≈ $0）
 """
 import sys
 import os
@@ -17,36 +21,64 @@ import boto3  # noqa: E402
 from app.config import settings  # noqa: E402
 
 
-def create_table():
-    ddb = boto3.client("dynamodb", region_name=settings.aws_region)
-    table = settings.mapping_table_name
-    gsi = settings.mapping_gsi_name
-
+def _create(ddb, name: str, attrs: list, key_schema: list, gsis: list):
     existing = ddb.list_tables().get("TableNames", [])
-    if table in existing:
-        print(f"表 {table} 已存在，跳过。")
+    if name in existing:
+        print(f"表 {name} 已存在，跳过。")
         return
-
-    ddb.create_table(
-        TableName=table,
+    kwargs = dict(
+        TableName=name,
         BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[
+        AttributeDefinitions=attrs,
+        KeySchema=key_schema,
+    )
+    if gsis:
+        kwargs["GlobalSecondaryIndexes"] = gsis
+    ddb.create_table(**kwargs)
+    print(f"正在创建表 {name}...")
+    ddb.get_waiter("table_exists").wait(TableName=name)
+    print(f"  {name} 完成。")
+
+
+def create_tables():
+    ddb = boto3.client("dynamodb", region_name=settings.aws_region)
+
+    # 1) 映射表
+    _create(
+        ddb,
+        settings.mapping_table_name,
+        attrs=[
             {"AttributeName": "kiro_user_id", "AttributeType": "S"},
             {"AttributeName": "feishu_open_id", "AttributeType": "S"},
         ],
-        KeySchema=[{"AttributeName": "kiro_user_id", "KeyType": "HASH"}],
-        GlobalSecondaryIndexes=[
+        key_schema=[{"AttributeName": "kiro_user_id", "KeyType": "HASH"}],
+        gsis=[
             {
-                "IndexName": gsi,
+                "IndexName": settings.mapping_gsi_name,
                 "KeySchema": [{"AttributeName": "feishu_open_id", "KeyType": "HASH"}],
                 "Projection": {"ProjectionType": "ALL"},
             }
         ],
     )
-    print(f"正在创建表 {table}（含 GSI {gsi}）...")
-    ddb.get_waiter("table_exists").wait(TableName=table)
-    print("完成。")
+
+    # 2) 申请/审批表（表名与 RequestStore 默认一致：<mapping>-requests）
+    _create(
+        ddb,
+        f"{settings.mapping_table_name}-requests",
+        attrs=[
+            {"AttributeName": "request_id", "AttributeType": "S"},
+            {"AttributeName": "user_open_id", "AttributeType": "S"},
+        ],
+        key_schema=[{"AttributeName": "request_id", "KeyType": "HASH"}],
+        gsis=[
+            {
+                "IndexName": "user_open_id-index",
+                "KeySchema": [{"AttributeName": "user_open_id", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "ALL"},
+            }
+        ],
+    )
 
 
 if __name__ == "__main__":
-    create_table()
+    create_tables()

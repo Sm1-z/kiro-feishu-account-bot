@@ -155,7 +155,8 @@ def start_ws_client() -> None:
             try:
                 start = int(round(_t.time() * 1000))
                 if mt in (MessageType.EVENT, MessageType.CARD):
-                    result = self._event_handler._do_without_validation(pl)
+                    # lark-oapi 1.4.15 该方法名无前导下划线（do_without_validation）
+                    result = self._event_handler.do_without_validation(pl)
                 else:
                     return
                 end = int(round(_t.time() * 1000))

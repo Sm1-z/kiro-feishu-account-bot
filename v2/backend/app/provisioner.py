@@ -120,7 +120,17 @@ def _update_assignment(user_id: str, sub_type: str, credentials, region: str) ->
             credentials,
         )
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"UpdateAssignment failed: HTTP {exc.code}: {exc.read().decode()}") from exc
+        body = exc.read().decode()
+        # Kiro 控制面对「订阅尚未激活(PENDING)的账号」做变更会返回
+        # AccessDeniedException「your account is not authorized」——这是业务时序限制，
+        # 非 IAM 权限问题（EC2 最小权限 Role 实测：同账号 Create 成功、对已订阅再操作即被拒）。
+        # 翻译成用户可理解的提示。
+        if "AccessDeniedException" in body or exc.code in (400, 403):
+            raise RuntimeError(
+                "升级失败：该账号订阅尚未激活（PENDING），暂不能变更套餐。"
+                "请待用户首次登录 Kiro 激活订阅后再升级。"
+            ) from exc
+        raise RuntimeError(f"UpdateAssignment failed: HTTP {exc.code}: {body}") from exc
 
 
 def _delete_assignment(user_id: str, credentials, region: str) -> None:

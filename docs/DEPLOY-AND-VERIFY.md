@@ -40,7 +40,7 @@ python infra/create_table.py        # 凭证走 aws sso / Role
 - [ ] 给运行载体绑定 IAM Role（EC2 Instance Profile / ECS Task Role / EKS IRSA）
 - [ ] 附加 `infra/iam-policy.json`
 - [ ] 验证：在载体上 `aws sts get-caller-identity` 返回的是 Role，不是长期 AK/SK
-- [ ] 验证：`aws identitystore list-groups --identity-store-id <ID>` 能列出组（含申请要用的 team-a/PM/team-b/Q）
+- [ ] 验证：`aws identitystore list-groups --identity-store-id <ID>` 能列出组（含申请表单要用到的目标组）
 
 > ⚠️ 安全基线：全程**不要**在 `.env` 里填 `AWS_ACCESS_KEY_ID/SECRET`。
 

@@ -57,7 +57,7 @@ def test_transition_approve_then_execute(store):
     r = _mk(store)
     assert store.transition(r.request_id, PENDING, APPROVED) is True
     assert store.transition(r.request_id, APPROVED, EXECUTED,
-                            result={"user_id": "9067-x"}) is True
+                            result={"user_id": "test-uid-x"}) is True
     assert store.get(r.request_id).status == EXECUTED
 
 

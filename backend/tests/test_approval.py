@@ -75,15 +75,15 @@ def test_execute_apply_success_writes_mapping(stores):
     req = _apply_req(svc)
     svc.claim_approve(req.request_id, "ou_admin")
 
-    fake = MagicMock(success=True, user_id="9067-aaaa",
+    fake = MagicMock(success=True, user_id="test-uid-aaaa",
                      steps_succeeded=["user_created", "subscription_created"])
     with patch("app.approval.provisioner.provision", return_value=fake):
         done = svc.execute_approved(req.request_id)
 
     assert done.status == EXECUTED
-    assert done.result["user_id"] == "9067-aaaa"
+    assert done.result["user_id"] == "test-uid-aaaa"
     # 映射已写入，UserId 为锚点，首账号为 primary
-    m = svc.mapping.get("9067-aaaa")
+    m = svc.mapping.get("test-uid-aaaa")
     assert m is not None
     assert m.feishu_open_id == "ou_li"
     assert m.account_role == PRIMARY

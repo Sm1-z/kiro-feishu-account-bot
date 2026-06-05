@@ -94,7 +94,7 @@ def test_full_apply_approve_flow(client):
     assert len(pend) == 1 and pend[0]["request_id"] == rid
 
     # 3. 审批通过（后台线程执行，mock provision + 通知）
-    fake = MagicMock(success=True, user_id="9067-aaaa",
+    fake = MagicMock(success=True, user_id="test-uid-aaaa",
                      steps_succeeded=["user_created", "subscription_created"])
     with patch("app.approval.provisioner.provision", return_value=fake), \
          patch("app.approval.feishu.update_card"), \
@@ -113,7 +113,7 @@ def test_full_apply_approve_flow(client):
     me = client.get("/api/auth/me", headers=_auth(USER, "张三")).json()
     assert len(me["accounts"]) == 1
     acct = me["accounts"][0]
-    assert acct["kiro_user_id"] == "9067-aaaa"
+    assert acct["kiro_user_id"] == "test-uid-aaaa"
     assert acct["account_role"] == "primary"
     assert acct["kiro_username"] == "zhangsan"
 

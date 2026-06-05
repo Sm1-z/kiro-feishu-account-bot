@@ -39,7 +39,7 @@ infra/
 backend/tests/       moto + mock 测试（40 passed）
 ```
 
-## 核心范式（与早期方案的本质区别）
+## 核心范式
 
 - **运行态零探测**：日常只读 DynamoDB 映射，不在热路径拼音探测 IDC
 - **UserId 锚点**：以 IDC UserId（不随改名变）为主键，真名保护表退役

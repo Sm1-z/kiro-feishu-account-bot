@@ -55,7 +55,7 @@ def store():
 def test_put_and_get_by_userid(store):
     """正查：UserId → 映射，O(1) 命中。"""
     m = AccountMapping(
-        kiro_user_id="9067-aaaa",
+        kiro_user_id="test-uid-aaaa",
         feishu_open_id="ou_zhangsan",
         feishu_name="张三",
         kiro_username="zhangsan",
@@ -63,7 +63,7 @@ def test_put_and_get_by_userid(store):
         account_role=PRIMARY,
     )
     store.put(m)
-    got = store.get("9067-aaaa")
+    got = store.get("test-uid-aaaa")
     assert got is not None
     assert got.feishu_name == "张三"
     assert got.account_role == PRIMARY
@@ -72,12 +72,12 @@ def test_put_and_get_by_userid(store):
 
 def test_one_person_multiple_accounts(store):
     """1:N — 一个人多个账号，GSI 反查全部。"""
-    store.put(AccountMapping(kiro_user_id="9067-aaaa", feishu_open_id="ou_zhangsan",
+    store.put(AccountMapping(kiro_user_id="test-uid-aaaa", feishu_open_id="ou_zhangsan",
                              kiro_username="zhangsan", account_role=PRIMARY))
-    store.put(AccountMapping(kiro_user_id="9067-bbbb", feishu_open_id="ou_zhangsan",
+    store.put(AccountMapping(kiro_user_id="test-uid-bbbb", feishu_open_id="ou_zhangsan",
                              kiro_username="zhangsan-new1", account_role=SECONDARY))
-    store.put(AccountMapping(kiro_user_id="9067-cccc", feishu_open_id="ou_zhangsan",
-                             kiro_username="zhangsan", account_role=PRIMARY))
+    store.put(AccountMapping(kiro_user_id="test-uid-cccc", feishu_open_id="ou_lisi",
+                             kiro_username="lisi", account_role=PRIMARY))
 
     zhangsan_accounts = store.list_by_feishu("ou_zhangsan")
     assert len(zhangsan_accounts) == 2
@@ -85,7 +85,7 @@ def test_one_person_multiple_accounts(store):
     assert usernames == {"zhangsan", "zhangsan-new1"}
 
     assert store.count_active("ou_zhangsan") == 2
-    assert store.count_active("ou_zhangsan") == 1
+    assert store.count_active("ou_lisi") == 1
 
 
 def test_primary_secondary_and_retention(store):

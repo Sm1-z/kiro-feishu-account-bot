@@ -22,7 +22,7 @@
     approved_by           审批人 open_id（审计）
     created_at / updated_at
 
-运行态只读写本表，**不在热路径探测 IDC**（区别于早期方案每次登录拼音探测）。
+运行态只读写本表，**不在热路径探测 IDC**（避免每次登录拼音探测 IDC）。
 """
 from __future__ import annotations
 

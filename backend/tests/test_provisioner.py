@@ -78,7 +78,7 @@ def test_provision_invalid_tier():
 def test_provision_happy_path_returns_userid():
     """开通成功返回 UserId（稳定锚点），步骤齐全。"""
     idc = MagicMock()
-    idc.create_user.return_value = {"UserId": "9067-aaaa"}
+    idc.create_user.return_value = {"UserId": "test-uid-aaaa"}
     idc.get_group_id.return_value = {"GroupId": "g-1"}
     idc.create_group_membership.return_value = {}
     session = MagicMock()
@@ -92,7 +92,7 @@ def test_provision_happy_path_returns_userid():
         r = P.provision("zhangsan", "l@x.com", "De", "Li", "pro+", "Q")
 
     assert r.success is True
-    assert r.user_id == "9067-aaaa"
+    assert r.user_id == "test-uid-aaaa"
     assert "user_created" in r.steps_succeeded
     assert "subscription_created" in r.steps_succeeded
 

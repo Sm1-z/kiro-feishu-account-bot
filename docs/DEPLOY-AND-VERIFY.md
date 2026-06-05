@@ -1,4 +1,4 @@
-# v2 真机部署与飞书联调清单
+# 真机部署与飞书联调清单
 
 > 从零到端到端跑通的操作清单。按顺序执行，每步带验证点。
 >
@@ -31,7 +31,7 @@
 
 ### 1.1 建 DynamoDB 表
 ```bash
-cd v2 && python infra/create_table.py        # 凭证走 aws sso / Role
+python infra/create_table.py        # 凭证走 aws sso / Role
 ```
 - [ ] 验证：控制台能看到 `kiro-account-mapping`（含 GSI `feishu_open_id-index`）
 - [ ] 手动建第二张表 `kiro-account-mapping-requests`（PK=request_id）。可仿照 create_table.py 加一段，或控制台建
@@ -81,7 +81,7 @@ cd v2 && python infra/create_table.py        # 凭证走 aws sso / Role
 
 ### 3.1 配置 .env
 ```bash
-cd v2/backend && cp .env.example .env
+cd backend && cp .env.example .env
 ```
 填入（**无 AK/SK**）：
 - [ ] `IDENTITY_STORE_ID` / `SSO_INSTANCE_ARN` / `KIRO_SIGN_IN_URL`
@@ -95,7 +95,7 @@ cd v2/backend && cp .env.example .env
 
 ### 3.2 构建前端 + 启动
 ```bash
-cd v2/frontend && npm install && npm run build   # 产物进 backend/static
+cd frontend && npm install && npm run build   # 产物进 backend/static
 cd ../backend && pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```

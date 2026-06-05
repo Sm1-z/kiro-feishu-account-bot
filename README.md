@@ -1,94 +1,67 @@
-# Kiro Bot
+# Kiro 账号管理平台
 
-> **⚠️ 本方案由 AWS SA Yuanhao 设计，仅适用于测试环境，不建议用于生产环境。**
+> Kiro 账号自助管理：飞书 OAuth 登录 → Web 自助申请 → 飞书卡片审批（免公网 WS 长连接）
+> → 自动开通 IDC 用户/加组/发密码邮件/Kiro 订阅 → DynamoDB 映射（UserId 锚点）。
+> 设计文档见 [docs/design/](docs/design/)，部署联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)。
 
-飞书机器人，用于在飞书群内自助管理 Kiro IDE 账号（开通、升级、查询套餐）。
+## 进度
 
-## 功能
+| 里程碑 | 状态 | 内容 |
+|--------|:----:|------|
+| 安全基线 | ✅ | IAM Role 凭证链（无 AK/SK）、最小权限 Policy（EC2 真机验证够用） |
+| 核心范式 | ✅ | DynamoDB 映射层、Provisioner、关联解析器 |
+| Web 层 + 飞书 | ✅ | FastAPI 路由、飞书 OAuth/WS 审批、React 前端，端到端 40 测试通过 |
+| 真机联调 | ✅ | 本地 + EC2 公网（Cloudflare Tunnel）端到端开通验证 |
+| 用量看板 | ✅ | 对接 Kiro Analytics（Athena），账号总览按人聚合 + 图表 |
 
-| 触发词 | 功能 | 说明 |
-|--------|------|------|
-| `申请kiro` / `/kiro-apply` | 开通账号 | 填写表单 → 创建 IAM IC 用户 → 加组 → 发密码邮件 → 订阅 Kiro |
-| `升级kiro` / `/kiro-upgrade` | 升级套餐 | 输入用户名 + 选目标套餐 → UpdateAssignment |
-| `查询kiro` / `/kiro-query` | 查询套餐 | 输入用户名 → 显示当前订阅 |
-| `帮助` / `/help` | 帮助 | 显示使用说明 |
-
-## 套餐
-
-| 套餐 | 价格 | Credits |
-|------|------|---------|
-| Kiro Pro | $20/mo | 1,000 |
-| Kiro Pro+ | $40/mo | 2,000 |
-| Kiro Power | $200/mo | 10,000 |
-
-## 架构
+## 已实现模块
 
 ```
-飞书群 @机器人 → API Gateway (HTTP API) → Lambda → AWS Identity Center + Kiro API
+backend/app/
+├── config.py        配置层（pydantic-settings，仅资源标识，无密钥字段）
+├── aws.py           AWS 会话/凭证唯一出口（默认链=Role，无 AK/SK 读取路径）
+├── mapping_store.py DynamoDB 映射层（PK=kiro_user_id, GSI=feishu_open_id，1:N，主/副）
+├── provisioner.py   开通/升级/取消/查询/批量（幂等 + 429 退避）
+├── resolver.py      关联解析器（运行态零探测 + 迁移期 email/拼音兜底）
+├── request_store.py 申请/审批记录 + 状态机条件更新防重
+├── approval.py      审批执行引擎（抢占防重 + 异步执行 + 写映射）
+├── feishu.py        飞书 OAuth + 卡片收发
+├── cards.py         飞书卡片模板
+├── feishu_ws.py     WS 长连接（免公网，先 ACK 后异步）
+├── auth.py          JWT + 认证依赖
+├── schemas.py       API 请求模型
+├── routers/         auth / request / admin 路由（14 API）
+└── main.py          FastAPI 入口（启动 WS + 托管前端）
+frontend/            React + TS + AntD（登录/Dashboard/审批面板）
+infra/
+├── iam-policy.json  最小权限策略
+└── create_table.py  建表脚本
+backend/tests/       moto + mock 测试（40 passed）
 ```
 
-### 文件结构
+## 核心范式（与早期方案的本质区别）
 
+- **运行态零探测**：日常只读 DynamoDB 映射，不在热路径拼音探测 IDC
+- **UserId 锚点**：以 IDC UserId（不随改名变）为主键，真名保护表退役
+- **拼音降级**：仅迁移期 `MigrationResolver` 走拼音/email 兜底
+- **无密钥**：凭证全程 IAM Role
+
+## 本地开发
+
+```bash
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # 填资源标识，无需填 AK/SK（用 aws sso login）
+
+# 跑测试（用 moto mock，无需真实 AWS）
+pip install pytest moto
+python -m pytest tests/ -q
 ```
-kiro-bot/
-├── lambda_function.py   # Lambda 入口，路由消息/卡片回调
-├── feishu.py            # 飞书 API 客户端（签名、token、消息发送）
-├── cards.py             # 飞书交互卡片模板
-├── permission.py        # 两层权限校验（chat_id + admin open_id）
-└── provisioner.py       # 核心业务（开通/升级/查询）
-```
 
-### 开通流程（4 步）
+## 部署前置
 
-1. `identitystore:CreateUser` — 创建 IAM Identity Center 用户
-2. `identitystore:CreateGroupMembership` — 加入 SSO 组
-3. `SWBUPService.UpdatePassword` — 发送密码设置邮件（SigV4 签名）
-4. `AmazonQDeveloperService.CreateAssignment` — 订阅 Kiro 套餐（SigV4 签名）
-
-所有步骤均幂等：用户已存在/已在组内/已订阅不会报错。
-
-## 权限模型
-
-- **chat_id 白名单**：非白名单群的消息静默丢弃
-- **admin open_id 白名单**：白名单群内非管理员操作被明确拒绝
-
-## 环境变量
-
-| 变量 | 必填 | 说明 |
-|------|:----:|------|
-| `FEISHU_APP_ID` | ✅ | 飞书应用 App ID |
-| `FEISHU_APP_SECRET` | ✅ | 飞书应用 App Secret |
-| `ALLOWED_CHAT_IDS` | ✅ | 允许的群 chat_id（逗号分隔） |
-| `ADMIN_OPEN_IDS` | ✅ | 管理员 open_id（逗号分隔） |
-| `IDENTITY_STORE_ID` | ✅ | IAM Identity Center Identity Store ID |
-| `TARGET_REGION` | | Kiro 所在 region（默认 `us-east-1`） |
-| `KIRO_GROUP_NAME` | | SSO 组名（默认 `Q`） |
-| `SSO_INSTANCE_ARN` | ✅ | SSO Instance ARN（用于查询订阅） |
-| `KIRO_SIGN_IN_URL` | ✅ | SSO 登录地址 |
-| `FEISHU_ENCRYPT_KEY` | | 飞书加密事件密钥（启用加密模式时填） |
-
-## IAM 权限
-
-Lambda 执行角色需要：
-
-```json
-{
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-      "Resource": "arn:aws:logs:*:*:*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["sso:*", "identitystore:*", "sso-directory:*"],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["q:*", "codewhisperer:*", "user-subscriptions:*"],
-      "Resource": "*"
-    }
-  ]
-}
-```
+1. 建表：`python infra/create_table.py`（凭证走 Role / aws sso）
+2. 绑定 IAM Role，附加 `infra/iam-policy.json`
+3. 容器形态见设计文档 [01-architecture.md](docs/design/01-architecture.md#部署形态建议按客户场景)
+</content>

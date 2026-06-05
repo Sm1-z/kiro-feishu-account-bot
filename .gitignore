@@ -3,3 +3,4 @@ package/
 __pycache__/
 *.pyc
 .env
+_archive_v1/

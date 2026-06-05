@@ -2,17 +2,18 @@
 
 > Kiro 账号自助管理：飞书 OAuth 登录 → Web 自助申请 → 飞书卡片审批（免公网 WS 长连接）
 > → 自动开通 IDC 用户/加组/发密码邮件/Kiro 订阅 → DynamoDB 映射（UserId 锚点）。
-> 设计文档见 [docs/design/](docs/design/)，部署联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)。
+> 部署与联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)。
 
-## 进度
+## 核心能力
 
-| 里程碑 | 状态 | 内容 |
-|--------|:----:|------|
-| 安全基线 | ✅ | IAM Role 凭证链（无 AK/SK）、最小权限 Policy（EC2 真机验证够用） |
-| 核心范式 | ✅ | DynamoDB 映射层、Provisioner、关联解析器 |
-| Web 层 + 飞书 | ✅ | FastAPI 路由、飞书 OAuth/WS 审批、React 前端，端到端 40 测试通过 |
-| 真机联调 | ✅ | 本地 + EC2 公网（Cloudflare Tunnel）端到端开通验证 |
-| 用量看板 | ✅ | 对接 Kiro Analytics（Athena），账号总览按人聚合 + 图表 |
+| 能力 | 说明 |
+|------|------|
+| 安全基线 | 凭证全程走 IAM Role，无长期 AK/SK；最小权限 Policy |
+| 自助申请 | 飞书 OAuth 登录 + Web 表单自助申请账号，自动推荐用户名 |
+| 飞书审批 | 卡片式审批（手机端可批），WS 长连接接收回调、免公网域名 |
+| 自动开通 | 一键完成 IDC 建用户 / 加组 / 发密码邮件 / Kiro 订阅，全步骤幂等 |
+| 账号治理 | UserId 锚点 + 一人多账号（主/副）+ DynamoDB 映射为唯一真相源 |
+| 用量看板 | 对接 Kiro Analytics，管理端账号总览按人聚合 + 用量图表 |
 
 ## 已实现模块
 
@@ -36,14 +37,14 @@ frontend/            React + TS + AntD（登录/Dashboard/审批面板）
 infra/
 ├── iam-policy.json  最小权限策略
 └── create_table.py  建表脚本
-backend/tests/       moto + mock 测试（40 passed）
+backend/tests/       moto + mock 单元测试
 ```
 
 ## 核心范式
 
 - **运行态零探测**：日常只读 DynamoDB 映射，不在热路径拼音探测 IDC
-- **UserId 锚点**：以 IDC UserId（不随改名变）为主键，真名保护表退役
-- **拼音降级**：仅迁移期 `MigrationResolver` 走拼音/email 兜底
+- **UserId 锚点**：以 IDC UserId（不随改名变）为主键，无需维护真名映射表
+- **拼音降级**：仅存量迁移期走拼音/email 兜底，运行态纯 DB 读路径
 - **无密钥**：凭证全程 IAM Role
 
 ## 本地开发
@@ -63,5 +64,5 @@ python -m pytest tests/ -q
 
 1. 建表：`python infra/create_table.py`（凭证走 Role / aws sso）
 2. 绑定 IAM Role，附加 `infra/iam-policy.json`
-3. 容器形态见设计文档 [01-architecture.md](docs/design/01-architecture.md#部署形态建议按客户场景)
+3. 部署形态（EC2 / ECS / EKS）与端到端联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
 </content>

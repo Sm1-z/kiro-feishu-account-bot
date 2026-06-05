@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Space, Segmented, message, Popconfirm,
-  Typography, Layout, Tabs,
+  Typography, Layout, Tabs, Row, Col, Statistic,
 } from 'antd'
 import {
   adminRequests, approve, reject, getAccounts, ReqItem, AccountRow,
 } from '../api'
+import { HBarChart, DonutChart } from '../components/MiniCharts'
 
 const { Header, Content } = Layout
 const { Title } = Typography
@@ -83,6 +84,41 @@ function RequestsPanel() {
   )
 }
 
+// 一个飞书人聚合后的视图（名下多账号汇总）
+interface PersonRow {
+  feishu_open_id: string
+  feishu_name: string
+  account_count: number
+  credits: number          // 名下所有账号 credits 之和
+  messages: number
+  has_usage: boolean       // 是否有任一账号拿到用量
+  last_active: string
+  accounts: AccountRow[]   // 子账号明细（展开用）
+}
+
+function aggregateByPerson(rows: AccountRow[]): PersonRow[] {
+  const map = new Map<string, PersonRow>()
+  for (const r of rows) {
+    const key = r.feishu_open_id || r.kiro_user_id
+    let p = map.get(key)
+    if (!p) {
+      p = { feishu_open_id: r.feishu_open_id, feishu_name: r.feishu_name || '—',
+            account_count: 0, credits: 0, messages: 0, has_usage: false,
+            last_active: '', accounts: [] }
+      map.set(key, p)
+    }
+    p.accounts.push(r)
+    p.account_count += 1
+    if (r.usage_credits != null) { p.credits += r.usage_credits; p.has_usage = true }
+    if (r.usage_messages != null) { p.messages += r.usage_messages; p.has_usage = true }
+    if (r.usage_last_active && r.usage_last_active > p.last_active) p.last_active = r.usage_last_active
+  }
+  return [...map.values()].sort((a, b) => b.credits - a.credits)
+}
+
+const roleTag = (r: string) =>
+  r === 'primary' ? <Tag color="gold">主</Tag> : <Tag>副</Tag>
+
 function AccountsPanel() {
   const [rows, setRows] = useState<AccountRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -94,43 +130,101 @@ function AccountsPanel() {
   }
   useEffect(() => { load() }, [])
 
-  const roleTag = (r: string) =>
-    r === 'primary' ? <Tag color="gold">主</Tag> : <Tag>副</Tag>
+  const people = aggregateByPerson(rows)
 
-  const cols = [
-    { title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—' },
+  // ── 指标卡 ──
+  const totalAccounts = rows.length
+  const totalPeople = people.length
+  const totalCredits = rows.reduce((s, r) => s + (r.usage_credits ?? 0), 0)
+  const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length
+
+  // ── 图表数据 ──
+  const topByCredits = people.filter((p) => p.credits > 0)
+    .slice(0, 8).map((p) => ({ label: p.feishu_name, value: +p.credits.toFixed(1) }))
+  const tierDist = (() => {
+    const m = new Map<string, number>()
+    for (const r of rows) { const t = r.tier || '未知'; m.set(t, (m.get(t) || 0) + 1) }
+    return [...m.entries()].map(([label, value]) => ({ label, value }))
+  })()
+
+  // ── 子账号明细（展开）──
+  const subCols = [
     { title: '用户名', dataIndex: 'kiro_username' },
-    { title: '分组', dataIndex: 'team' },
-    { title: '主/副', dataIndex: 'account_role', render: roleTag,
-      filters: [{ text: '主账号', value: 'primary' }, { text: '副账号', value: 'secondary' }],
-      onFilter: (v: any, r: AccountRow) => r.account_role === v },
+    { title: '主/副', dataIndex: 'account_role', render: roleTag },
     { title: 'Tier', dataIndex: 'tier', render: (t: string) => t ? <Tag color="blue">{t}</Tag> : '—' },
+    { title: '分组', dataIndex: 'team' },
     { title: '状态', dataIndex: 'status', render: (s: string) =>
       <Tag color={s === 'active' ? 'green' : 'default'}>{s}</Tag> },
-    { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const,
-      render: fmtCredits,
-      sorter: (a: AccountRow, b: AccountRow) => (a.usage_credits ?? -1) - (b.usage_credits ?? -1) },
-    { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const,
-      render: fmtNum,
-      sorter: (a: AccountRow, b: AccountRow) => (a.usage_messages ?? -1) - (b.usage_messages ?? -1) },
-    { title: '活跃天', dataIndex: 'usage_active_days', align: 'right' as const, render: fmtNum },
-    { title: '最后活跃', dataIndex: 'usage_last_active', render: (v: string | null) =>
-      v || <span style={{ color: '#ccc' }}>—</span> },
+    { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits },
+    { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const, render: fmtNum },
+    { title: '最后活跃', dataIndex: 'usage_last_active',
+      render: (v: string | null) => v || <span style={{ color: '#ccc' }}>—</span> },
+  ]
+
+  // ── 按人聚合主表 ──
+  const personCols = [
+    { title: '飞书用户', dataIndex: 'feishu_name' },
+    { title: '账号数', dataIndex: 'account_count', align: 'right' as const,
+      render: (n: number) => <Tag>{n}</Tag> },
+    { title: 'Credits（汇总）', dataIndex: 'credits', align: 'right' as const,
+      defaultSortOrder: 'descend' as const,
+      render: (v: number, p: PersonRow) => p.has_usage ? v.toFixed(2) : <span style={{ color: '#ccc' }}>—</span>,
+      sorter: (a: PersonRow, b: PersonRow) => a.credits - b.credits },
+    { title: '消息数（汇总）', dataIndex: 'messages', align: 'right' as const,
+      render: (v: number, p: PersonRow) => p.has_usage ? v.toLocaleString() : <span style={{ color: '#ccc' }}>—</span>,
+      sorter: (a: PersonRow, b: PersonRow) => a.messages - b.messages },
+    { title: '最后活跃', dataIndex: 'last_active',
+      render: (v: string) => v || <span style={{ color: '#ccc' }}>—</span> },
   ]
 
   return (
-    <Card
-      title="账号总览"
-      extra={<Button onClick={load}>刷新</Button>}
-    >
-      <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8 }}>
-        用量数据来自 Kiro Analytics（Athena，约每日更新、缓存 5 分钟）；
-        显示 — 表示该账号暂无用量记录或未配置数据源。可点列头按 Credits/消息数排序，
-        筛选副账号识别低用量回收对象。
-      </Typography.Paragraph>
-      <Table rowKey="kiro_user_id" dataSource={rows} columns={cols} loading={loading}
-        pagination={{ pageSize: 15 }} size="small" />
-    </Card>
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      {/* 指标卡 */}
+      <Row gutter={16}>
+        <Col span={6}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
+        <Col span={6}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
+        <Col span={6}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
+        <Col span={6}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
+      </Row>
+
+      {/* 图表 */}
+      <Row gutter={16}>
+        <Col span={14}>
+          <Card size="small" title="Top 用户 · Credits（按人汇总）">
+            <HBarChart data={topByCredits} />
+          </Card>
+        </Col>
+        <Col span={10}>
+          <Card size="small" title="账号 Tier 分布">
+            <DonutChart data={tierDist} />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* 按人聚合表（可展开下钻子账号） */}
+      <Card size="small" title="按飞书用户聚合（展开看名下各账号）"
+        extra={<Button size="small" onClick={load}>刷新</Button>}>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
+          一人多账号已合并为一行，Credits/消息为名下所有账号汇总；点行首 ▸ 展开看每个子账号。
+          用量来自 Kiro Analytics（Athena，约每日更新、缓存 5 分钟），— 表示暂无用量数据。
+        </Typography.Paragraph>
+        <Table
+          rowKey="feishu_open_id"
+          dataSource={people}
+          columns={personCols}
+          loading={loading}
+          size="small"
+          pagination={{ pageSize: 15 }}
+          expandable={{
+            expandedRowRender: (p: PersonRow) => (
+              <Table rowKey="kiro_user_id" dataSource={p.accounts} columns={subCols}
+                size="small" pagination={false} />
+            ),
+            rowExpandable: (p: PersonRow) => p.accounts.length > 0,
+          }}
+        />
+      </Card>
+    </Space>
   )
 }
 

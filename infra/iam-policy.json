@@ -20,7 +20,10 @@
     {
       "Sid": "SsoAdminReadInstance",
       "Effect": "Allow",
-      "Action": ["sso:ListInstances"],
+      "Action": [
+        "sso:ListInstances",
+        "sso:DescribeApplication"
+      ],
       "Resource": "*"
     },
     {

@@ -24,6 +24,12 @@
       "Resource": "*"
     },
     {
+      "Sid": "SsoDirectoryPasswordReset",
+      "Effect": "Allow",
+      "Action": ["sso-directory:UpdatePassword"],
+      "Resource": "*"
+    },
+    {
       "Sid": "KiroSubscription",
       "Effect": "Allow",
       "Action": [

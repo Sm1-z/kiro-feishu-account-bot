@@ -10,12 +10,12 @@ class ApplyIn(BaseModel):
     given_name: str = ""
     family_name: str = ""
     group: str = ""
-    tier: str = Field(pattern="^(pro|pro\\+|power)$")
+    tier: str = Field(pattern="^(pro|pro\\+|pro max|power)$")
 
 
 class UpgradeIn(BaseModel):
     kiro_user_id: str
-    target_tier: str = Field(pattern="^(pro|pro\\+|power)$")
+    target_tier: str = Field(pattern="^(pro|pro\\+|pro max|power)$")
 
 
 class QuotaIn(BaseModel):

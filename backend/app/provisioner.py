@@ -31,15 +31,25 @@ logger = logging.getLogger(__name__)
 TIER_MAP = {
     "pro": "Q_DEVELOPER_STANDALONE_PRO",
     "pro+": "Q_DEVELOPER_STANDALONE_PRO_PLUS",
+    # Kiro Pro Max ($100)。subscriptionType 已对照 CreateAssignment 服务端枚举验证为合法值
+    # （枚举全集：FREE/STUDENT/PRO/PRO_PLUS/PRO_MAX/POWER/STANDALONE）。
+    "pro max": "Q_DEVELOPER_STANDALONE_PRO_MAX",
     "power": "Q_DEVELOPER_STANDALONE_POWER",
 }
-TIER_DISPLAY = {"pro": "Kiro Pro", "pro+": "Kiro Pro+", "power": "Kiro Power"}
+TIER_DISPLAY = {
+    "pro": "Kiro Pro",
+    "pro+": "Kiro Pro+",
+    "pro max": "Kiro Pro Max",
+    "power": "Kiro Power",
+}
 TIER_REVERSE = {
     "Q_DEVELOPER_STANDALONE_PRO": "pro",
     "Q_DEVELOPER_STANDALONE_PRO_PLUS": "pro+",
+    "Q_DEVELOPER_STANDALONE_PRO_MAX": "pro max",
     "Q_DEVELOPER_STANDALONE_POWER": "power",
     "KIRO_ENTERPRISE_PRO": "pro",
     "KIRO_ENTERPRISE_PRO_PLUS": "pro+",
+    "KIRO_ENTERPRISE_PRO_MAX": "pro max",
     "KIRO_ENTERPRISE_POWER": "power",
 }
 

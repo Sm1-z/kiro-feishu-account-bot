@@ -22,10 +22,14 @@ def _http_error(code, body):
 
 
 def test_tier_maps_complete():
-    assert set(P.TIER_MAP) == {"pro", "pro+", "power"}
+    assert set(P.TIER_MAP) == {"pro", "pro+", "pro max", "power"}
     # 反向映射覆盖 standalone 与 enterprise 两套 plan code
     assert P.TIER_REVERSE["Q_DEVELOPER_STANDALONE_POWER"] == "power"
     assert P.TIER_REVERSE["KIRO_ENTERPRISE_PRO_PLUS"] == "pro+"
+    # 新增 Kiro Pro Max ($100)：两套 plan code 均能反查
+    assert P.TIER_REVERSE["Q_DEVELOPER_STANDALONE_PRO_MAX"] == "pro max"
+    assert P.TIER_REVERSE["KIRO_ENTERPRISE_PRO_MAX"] == "pro max"
+    assert P.TIER_DISPLAY["pro max"] == "Kiro Pro Max"
 
 
 def test_tier_of_subscription_both_shapes():
@@ -95,6 +99,27 @@ def test_provision_happy_path_returns_userid():
     assert r.user_id == "test-uid-aaaa"
     assert "user_created" in r.steps_succeeded
     assert "subscription_created" in r.steps_succeeded
+
+
+def test_provision_pro_max_uses_correct_subscription_type():
+    """开通 Kiro Pro Max 时，传给 CreateAssignment 的 subscriptionType 必须是 Pro Max 的映射值。"""
+    idc = MagicMock()
+    idc.create_user.return_value = {"UserId": "test-uid-bbbb"}
+    idc.get_group_id.return_value = {"GroupId": "g-1"}
+    idc.create_group_membership.return_value = {}
+    session = MagicMock()
+    session.client.return_value = idc
+
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch.object(P, "_send_password_reset"), \
+         patch.object(P, "_create_assignment", return_value=True) as mock_assign:
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "pro max", "Q")
+
+    assert r.success is True
+    # _create_assignment(user_id, sub_type, credentials, region) —— sub_type 为第 2 个位置参数
+    assert mock_assign.call_args.args[1] == P.TIER_MAP["pro max"]
 
 
 def test_provision_duplicate_username_blocks():

@@ -14,6 +14,7 @@ const { Title } = Typography
 const TIER_OPTS = [
   { value: 'pro', label: 'Kiro Pro ($20)' },
   { value: 'pro+', label: 'Kiro Pro+ ($40)' },
+  { value: 'pro max', label: 'Kiro Pro Max ($100)' },
   { value: 'power', label: 'Kiro Power ($200)' },
 ]
 const roleTag = (r: string) =>

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 TYPE_LABEL = {"apply": "开通账号", "upgrade": "升级套餐", "quota_increase": "增加配额"}
-TIER_LABEL = {"pro": "Kiro Pro", "pro+": "Kiro Pro+", "power": "Kiro Power"}
+TIER_LABEL = {"pro": "Kiro Pro", "pro+": "Kiro Pro+", "pro max": "Kiro Pro Max", "power": "Kiro Power"}
 
 
 def _fields(req_type: str, applicant: str, payload: dict) -> list[dict]:

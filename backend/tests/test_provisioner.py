@@ -138,3 +138,25 @@ def test_provision_duplicate_username_blocks():
 
     assert r.success is False
     assert r.error_step == "create_user"
+
+
+def test_bulk_cancel_also_deletes_mapping():
+    """回收账号时：退订 + 删 IDC 用户 + 删映射三者同步，避免孤儿映射。"""
+    idc = MagicMock()
+    session = MagicMock()
+    session.client.return_value = idc
+    mapping = MagicMock()
+
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "_delete_assignment"):
+        res = P.bulk_cancel(["uid-1", "uid-2"])
+
+    assert all(r["success"] for r in res)
+    idc.delete_user.assert_any_call(IdentityStoreId="d-1", UserId="uid-1")
+    # 关键：映射也被删（修复孤儿记录 bug）
+    mapping.delete.assert_any_call("uid-1")
+    mapping.delete.assert_any_call("uid-2")
+    assert mapping.delete.call_count == 2

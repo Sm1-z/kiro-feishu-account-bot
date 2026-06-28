@@ -14,7 +14,7 @@ from app.auth import CurrentUser, current_user
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import (
-    APPLY, PENDING, QUOTA_INCREASE, UPGRADE, Request, RequestStore,
+    APPLY, QUOTA_INCREASE, UPGRADE, Request, RequestStore,
 )
 from app.schemas import ApplyIn, QuotaIn, UpgradeIn
 
@@ -39,12 +39,7 @@ def apply(body: ApplyIn, user: CurrentUser = Depends(current_user)):
     store = MappingStore()
     reqs = RequestStore()
 
-    # 配额：active + pending < quota
-    active = store.count_active(user.open_id)
-    pending = sum(1 for r in reqs.list_by_user(user.open_id)
-                  if r.status == PENDING and r.type == APPLY)
-    if active + pending >= settings.default_account_quota:
-        raise HTTPException(400, "已达账号配额上限，请先申请增加配额")
+    # 账号数量不设上限（不限制每人可申请的 Kiro 账号数）
 
     # 用户名占用
     if body.username in store.all_usernames():

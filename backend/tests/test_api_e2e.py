@@ -129,6 +129,22 @@ def test_apply_duplicate_email_blocked(client):
     assert "邮箱" in r.json()["detail"]
 
 
+def test_apply_no_account_quota_limit(client):
+    """不再限制每人账号数：同一用户连续申请超过原配额（2）仍应被接受。"""
+    from app.mapping_store import AccountMapping, MappingStore
+    store = MappingStore()
+    # 预置 3 个已有 active 账号（超过原 quota=2）
+    for i in range(3):
+        store.put(AccountMapping(kiro_user_id=f"u{i}", feishu_open_id=USER,
+                                 kiro_username=f"existing{i}", kiro_email=f"e{i}@x.com",
+                                 status="active"))
+    # 再申请第 4 个，过去会被「已达账号配额上限」拦截，现在应放行
+    r = client.post("/api/requests/apply", headers=_auth(USER, "张三"), json={
+        "username": "zhangsan-extra", "email": "extra@x.com", "tier": "pro max"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "pending"
+
+
 def test_approve_dedup_via_api(client):
     """两次审批同一申请，第二次 409。"""
     r = client.post("/api/requests/apply", headers=_auth(USER, "张三"),

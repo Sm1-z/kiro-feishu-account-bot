@@ -353,17 +353,26 @@ def bulk_update_tier(user_ids: list[str], tier: str) -> list[dict]:
 
 
 def bulk_cancel(user_ids: list[str]) -> list[dict]:
-    """批量取消订阅 + 删 IDC 用户（副账号回收）。取消时 ResourceNotFound 视为成功。"""
+    """批量取消订阅 + 删 IDC 用户 + 删 DynamoDB 映射（副账号回收）。
+
+    三件事必须同步，否则映射表会残留孤儿记录（IDC 已删但映射还在），
+    导致 dashboard 显示幽灵账号、对其升级/操作报 USER not found。
+    取消订阅时 ResourceNotFound 视为成功（幂等）。
+    """
+    from app.mapping_store import MappingStore
+
     region = settings.aws_region
     session = get_session()
     id_store = get_identity_store_id(session)
     idc = session.client("identitystore", region_name=region)
     creds = get_frozen_credentials()
+    mapping = MappingStore()
     results = []
     for uid in user_ids:
         try:
             _delete_assignment(uid, creds, region)
             idc.delete_user(IdentityStoreId=id_store, UserId=uid)
+            mapping.delete(uid)  # 同步清映射，避免孤儿记录
             results.append({"user_id": uid, "success": True, "error": ""})
         except Exception as exc:
             results.append({"user_id": uid, "success": False, "error": str(exc)})

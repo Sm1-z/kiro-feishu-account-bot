@@ -64,5 +64,6 @@ python -m pytest tests/ -q
 
 1. 建表：`python infra/create_table.py`（凭证走 Role / aws sso）
 2. 绑定 IAM Role，附加 `infra/iam-policy.json`
-3. 部署形态（EC2 / ECS / EKS）与端到端联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
+3. 本地/飞书联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
+4. **生产 EC2 部署与日常更新见 [docs/DEPLOY-PRODUCTION.md](docs/DEPLOY-PRODUCTION.md)**（systemd + SSM 运维 + Deploy Key + IAM 开通链路权限坑，中英对照）
 </content>

@@ -1,6 +1,10 @@
-# 真机部署与飞书联调清单
+# 真机部署与飞书联调清单 / Local & Feishu Bring-up Checklist
 
-> 从零到端到端跑通的操作清单。按顺序执行，每步带验证点。
+> 从零到端到端跑通的**本地/飞书联调**清单。按顺序执行，每步带验证点。
+> Step-by-step checklist to bring the stack up **locally / for Feishu integration**, with a verify point per step.
+>
+> **生产 EC2 的部署与日常更新见 [DEPLOY-PRODUCTION.md](DEPLOY-PRODUCTION.md)**（systemd + SSM + Deploy Key + IAM 权限链路坑）。
+> **For production EC2 deploy & routine updates, see [DEPLOY-PRODUCTION.md](DEPLOY-PRODUCTION.md)** (systemd + SSM + Deploy Key + the IAM provisioning-chain pitfall).
 >
 > 端到端验证覆盖五个落点：IDC 用户 / 加组 / Kiro 订阅 / DynamoDB 映射 / 密码邮件。
 > 下方「踩坑速查」汇总了部署联调中常见的卡点与解法。
@@ -43,6 +47,9 @@ python infra/create_table.py        # 凭证走 aws sso / Role
 - [ ] 验证：`aws identitystore list-groups --identity-store-id <ID>` 能列出组（含申请表单要用到的目标组）
 
 > ⚠️ 安全基线：全程**不要**在 `.env` 里填 `AWS_ACCESS_KEY_ID/SECRET`。
+>
+> ⚠️ **开通链路权限**：订阅步 `q:CreateAssignment` 由 q 服务代理级联调用 sso/sso-directory/identitystore/user-subscriptions，逐个补 action 抠不全。`infra/iam-policy.json` 已按 namespace 放宽这组权限——详见 [DEPLOY-PRODUCTION.md §5](DEPLOY-PRODUCTION.md)。
+> **Provisioning perms**: the `q:CreateAssignment` step is proxied by the q service and cascades into sso/sso-directory/identitystore/user-subscriptions; a tight least-privilege set is un-enumerable. `infra/iam-policy.json` broadens these by namespace — see [DEPLOY-PRODUCTION.md §5](DEPLOY-PRODUCTION.md).
 
 ---
 
@@ -113,7 +120,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - [ ] 验证：`/api/auth/me` 的 `is_admin=true`（已回填自己 open_id）
 
 ### 4.2 申请（普通用户视角）
-- [ ] 点「申请账号」→ 表单（用户名已自动推荐）→ 选分组/套餐 → 提交
+- [ ] 点「申请账号」→ 表单（用户名已自动推荐）→ 选分组/套餐（pro / pro+ / **pro max ($100)** / power）→ 提交
 - [ ] 验证：飞书收到一张**审批卡片**（你既是申请人又是管理员，能收到）
 - [ ] 验证：「我的申请记录」出现一条 `pending`
 

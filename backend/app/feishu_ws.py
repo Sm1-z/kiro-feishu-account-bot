@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """飞书 WebSocket 长连接：接收卡片审批回调，免公网域名。
 
 设计 03/A3：lark-oapi WS 长连接接收 card.action.trigger。

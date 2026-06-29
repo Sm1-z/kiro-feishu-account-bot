@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """FastAPI 应用入口。
 
 启动时拉起飞书 WS 长连接（接收审批卡片回调，免公网）。

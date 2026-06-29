@@ -1,0 +1,37 @@
+Third-Party Licenses
+====================
+
+This sample depends on the third-party open source software listed below.
+The full license text of each is available from the linked project pages.
+
+Backend (Python)
+----------------
+| Package            | License        | Project |
+|--------------------|----------------|---------|
+| fastapi            | MIT            | https://github.com/fastapi/fastapi |
+| uvicorn            | BSD-3-Clause   | https://github.com/encode/uvicorn |
+| pydantic           | MIT            | https://github.com/pydantic/pydantic |
+| pydantic-settings  | MIT            | https://github.com/pydantic/pydantic-settings |
+| email-validator    | The Unlicense  | https://github.com/JoshData/python-email-validator |
+| boto3              | Apache-2.0     | https://github.com/boto/boto3 |
+| botocore           | Apache-2.0     | https://github.com/boto/botocore |
+| PyJWT              | MIT            | https://github.com/jpadilla/pyjwt |
+| pypinyin           | MIT            | https://github.com/mozillazg/python-pinyin |
+| lark-oapi          | MIT            | https://github.com/larksuite/oapi-sdk-python |
+| httpx              | BSD-3-Clause   | https://github.com/encode/httpx |
+
+Frontend (Node.js)
+------------------
+| Package                 | License      | Project |
+|-------------------------|--------------|---------|
+| react                   | MIT          | https://github.com/facebook/react |
+| react-dom               | MIT          | https://github.com/facebook/react |
+| react-router-dom        | MIT          | https://github.com/remix-run/react-router |
+| antd                    | MIT          | https://github.com/ant-design/ant-design |
+| axios                   | MIT          | https://github.com/axios/axios |
+| vite                    | MIT          | https://github.com/vitejs/vite |
+| @vitejs/plugin-react    | MIT          | https://github.com/vitejs/vite-plugin-react |
+| typescript              | Apache-2.0   | https://github.com/microsoft/TypeScript |
+
+All listed licenses are permissive (MIT / BSD-3-Clause / Apache-2.0 / The Unlicense)
+and compatible with redistribution of this sample under the MIT-0 license (see LICENSE).

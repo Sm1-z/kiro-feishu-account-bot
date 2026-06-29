@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Kiro 账号开通/变更/取消/查询 核心工作流。
 
 设计要点（安全基线）：

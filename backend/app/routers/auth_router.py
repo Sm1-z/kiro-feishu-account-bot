@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """认证路由：飞书 OAuth 登录 + 当前用户信息。"""
 from __future__ import annotations
 

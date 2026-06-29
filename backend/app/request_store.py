@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """申请/审批记录存储（DynamoDB）。
 
 与映射表分离的第二张表 kiro-account-requests。requests 表天然是审计日志

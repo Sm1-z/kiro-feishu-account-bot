@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """AWS 会话与凭证。
 
 唯一的 boto3 Session 出口。所有 AWS 调用都从这里取 session / client / 凭证，

@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Kiro 用量分析（对接 Analytics Dashboard）。
 
 数据源与 kiro-user-analytics-dashboard 同一套：Kiro 活动 CSV → Glue → Athena。

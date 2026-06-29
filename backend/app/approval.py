@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """审批执行引擎。
 
 把「审批通过后做什么」从 WS/HTTP 入口中剥离出来，便于测试与复用。

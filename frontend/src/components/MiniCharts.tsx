@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
 /** 轻量纯 SVG 图表，避免引入 echarts/recharts 增大 bundle。 */
 
 const PALETTE = ['#4361ee', '#3a0ca3', '#7209b7', '#f72585', '#4cc9f0',

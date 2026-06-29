@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """管理员路由：Web 审批（与飞书卡片审批同源）+ 用户/账号管理。
 
 审批走与 feishu_ws 相同的 ApprovalService（防重 + 异步执行），保证两个入口一致。

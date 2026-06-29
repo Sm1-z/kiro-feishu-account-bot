@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """JWT 认证与依赖。
 
 飞书 OAuth 回调后签发 JWT（载 open_id/name），前端持 Bearer 调 API。

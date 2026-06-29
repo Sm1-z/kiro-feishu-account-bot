@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """飞书交互卡片模板。
 
 - 审批卡片：推给管理员，含「通过 / 拒绝」按钮，action.value 带 request_id

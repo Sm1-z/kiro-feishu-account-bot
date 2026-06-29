@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Kiro 账号管理平台 v2 — 后端核心。
 
 设计文档见 ../../docs/design/。核心范式：

@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """申请路由（普通用户）：开通 / 升级 / 配额 + 我的申请。
 
 提交时做前置校验（设计 PRD §3.4）：配额、用户名占用、邮箱唯一。

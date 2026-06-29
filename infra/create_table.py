@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """创建 DynamoDB 表：映射表 + 申请/审批表。
 
 用法（凭证走 IAM Role / aws sso / 本地 default profile）：

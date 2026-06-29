@@ -65,4 +65,12 @@ python -m pytest tests/ -q
 1. 建表：`python infra/create_table.py`（凭证走 Role / aws sso）
 2. 绑定 IAM Role，附加 `infra/iam-policy.json`
 3. 部署与端到端联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
+## License
+
+This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
 </content>

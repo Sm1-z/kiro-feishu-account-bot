@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """关联解析器 —— 「飞书用户 ↔ IDC 账号」的分层解析。
 
 设计依据 ../../docs/design/02-paradigm.md、05-migration-and-flow.md。

@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """DynamoDB 映射层 —— 「飞书 ↔ IDC」唯一真相源。
 
 设计依据见 ../../docs/design/06-data-layer.md。

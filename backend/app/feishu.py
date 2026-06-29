@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """飞书 OpenAPI 客户端：OAuth 登录 + 消息卡片收发。
 
 仅封装 HTTP API（token / OAuth / 发卡片 / 更新卡片）。WebSocket 长连接见 feishu_ws.py。

@@ -2,7 +2,7 @@
 
 > Kiro 账号自助管理：飞书 OAuth 登录 → Web 自助申请 → 飞书卡片审批（免公网 WS 长连接）
 > → 自动开通 IDC 用户/加组/发密码邮件/Kiro 订阅 → DynamoDB 映射（UserId 锚点）。
-> 部署与联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)。
+> 部署与联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)；生产部署见 [docs/DEPLOY-PRODUCTION.md](docs/DEPLOY-PRODUCTION.md)；架构图见 [docs/architecture.drawio](docs/architecture.drawio)（draw.io 打开）。
 
 ## 核心能力
 

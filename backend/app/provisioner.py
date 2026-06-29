@@ -28,13 +28,14 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# 订阅走 user-subscriptions 的 Claim 模型（CreateClaim/UpdateClaim/DeleteClaim），
+# type.amazonQ 用 KIRO_ENTERPRISE_* 命名（与 ListUserSubscriptions/Console 一致）。
+# 旧的 q:CreateAssignment（Q_DEVELOPER_STANDALONE_*）已被 Kiro 控制面弃用，不再使用。
 TIER_MAP = {
-    "pro": "Q_DEVELOPER_STANDALONE_PRO",
-    "pro+": "Q_DEVELOPER_STANDALONE_PRO_PLUS",
-    # Kiro Pro Max ($100)。subscriptionType 已对照 CreateAssignment 服务端枚举验证为合法值
-    # （枚举全集：FREE/STUDENT/PRO/PRO_PLUS/PRO_MAX/POWER/STANDALONE）。
-    "pro max": "Q_DEVELOPER_STANDALONE_PRO_MAX",
-    "power": "Q_DEVELOPER_STANDALONE_POWER",
+    "pro": "KIRO_ENTERPRISE_PRO",
+    "pro+": "KIRO_ENTERPRISE_PRO_PLUS",
+    "pro max": "KIRO_ENTERPRISE_PRO_MAX",  # Kiro Pro Max ($100)
+    "power": "KIRO_ENTERPRISE_POWER",
 }
 TIER_DISPLAY = {
     "pro": "Kiro Pro",
@@ -100,14 +101,97 @@ def _send_password_reset(user_id: str, credentials, region: str) -> None:
         raise RuntimeError(f"UpdatePassword failed: HTTP {exc.code}: {exc.read().decode()}") from exc
 
 
+_US_SVC = "user-subscriptions"
+
+
+def _us_url(region: str) -> str:
+    return f"https://service.user-subscriptions.{region}.amazonaws.com/"
+
+
+def _us_target(op: str) -> str:
+    return f"AWSZornControlPlaneService.{op}"
+
+
+_app_arn_cache: dict = {}
+
+
+def _get_kiro_application_arn(credentials, region: str) -> str:
+    """获取 Kiro 订阅用的 application ARN（QDevProfile-*）。带进程内缓存。
+
+    订阅的 Claim 模型挂在 IdC application 上；该 ARN 通过 sso-admin:ListApplications
+    查 Name 以 'QDevProfile' 开头的那个（即 Q Developer / Kiro 订阅 profile）。
+    """
+    if region in _app_arn_cache:
+        return _app_arn_cache[region]
+    session = get_session()
+    sso = session.client("sso-admin", region_name=region)
+    instance_arn = settings.sso_instance_arn or _resolve_instance_arn(sso)
+    paginator = sso.get_paginator("list_applications") if sso.can_paginate("list_applications") else None
+    apps = []
+    if paginator:
+        for page in paginator.paginate(InstanceArn=instance_arn):
+            apps.extend(page.get("Applications", []))
+    else:
+        apps = sso.list_applications(InstanceArn=instance_arn).get("Applications", [])
+    for a in apps:
+        if (a.get("Name") or "").startswith("QDevProfile"):
+            _app_arn_cache[region] = a["ApplicationArn"]
+            return a["ApplicationArn"]
+    raise RuntimeError("未找到 Kiro 订阅 application（QDevProfile-*）；请确认 IdC 已启用 Kiro")
+
+
+def _resolve_instance_arn(sso) -> str:
+    insts = sso.list_instances().get("Instances", [])
+    if not insts:
+        raise RuntimeError("无 IAM Identity Center 实例")
+    return insts[0]["InstanceArn"]
+
+
+def _find_claim(user_id: str, credentials, region: str) -> dict | None:
+    """在 Kiro application 的 claims 里按 principal.user 找到该用户的订阅 claim。
+
+    返回含 identifier(subscription ARN) 与 type 的 claim dict；无则 None。
+    """
+    app_arn = _get_kiro_application_arn(credentials, region)
+    next_token = None
+    while True:
+        payload = {"applicationArn": app_arn, "maxResults": 100, "subscriptionRegion": region}
+        if next_token:
+            payload["nextToken"] = next_token
+        raw = _signed_post(_us_url(region), _us_target("ListApplicationClaims"), _US_SVC,
+                           region, payload, credentials)
+        data = json.loads(raw.decode())
+        for c in data.get("claims", []):
+            if c.get("principal", {}).get("user") == user_id:
+                return c
+        next_token = data.get("nextToken")
+        if not next_token:
+            return None
+
+
 def _create_assignment(user_id: str, sub_type: str, credentials, region: str,
                        max_retries: int = 3) -> bool:
-    """订阅。ConflictException=已订阅(幂等)；429 指数退避。返回 True=新订阅。"""
-    url = f"https://codewhisperer.{region}.amazonaws.com/"
-    payload = {"principalId": user_id, "principalType": "USER", "subscriptionType": sub_type}
+    """订阅（Claim 模型 CreateClaim）。已订阅(ConflictException)视为幂等成功；
+    429 指数退避。返回 True=新订阅、False=已存在。
+
+    sub_type 为 KIRO_ENTERPRISE_* 取值（见 TIER_MAP）。
+    """
+    app_arn = _get_kiro_application_arn(credentials, region)
+    instance_arn = settings.sso_instance_arn or _resolve_instance_arn(
+        get_session().client("sso-admin", region_name=region))
+    payload = {
+        "instanceArn": instance_arn,
+        "principal": {"user": user_id},
+        "applicationArn": app_arn,
+        "transaction": True,
+        "type": {"amazonQ": sub_type},
+        "identityProvider": "IDENTITY_STORE",
+        "createForSelf": False,
+        "subscriptionRegion": region,
+    }
     for attempt in range(max_retries + 1):
         try:
-            _signed_post(url, "AmazonQDeveloperService.CreateAssignment", "q",
+            _signed_post(_us_url(region), _us_target("CreateClaim"), _US_SVC,
                          region, payload, credentials)
             return True
         except urllib.error.HTTPError as exc:
@@ -117,54 +201,63 @@ def _create_assignment(user_id: str, sub_type: str, credentials, region: str,
             if exc.code == 429 and attempt < max_retries:
                 time.sleep(min(5 * 2 ** attempt, 60))
                 continue
-            raise RuntimeError(f"CreateAssignment failed: HTTP {exc.code}: {body}") from exc
-    raise RuntimeError("CreateAssignment: max retries exceeded")
+            raise RuntimeError(f"CreateClaim failed: HTTP {exc.code}: {body}") from exc
+    raise RuntimeError("CreateClaim: max retries exceeded")
 
 
 def _update_assignment(user_id: str, sub_type: str, credentials, region: str) -> None:
+    """升级/变更套餐（Claim 模型 UpdateClaim）。需先按 user 找到 subscription ARN。"""
+    claim = _find_claim(user_id, credentials, region)
+    if not claim:
+        raise RuntimeError("升级失败：未找到该账号的 Kiro 订阅（可能尚未开通）。")
+    payload = {
+        "identifier": claim["identifier"],
+        "transaction": False,
+        "type": {"amazonQ": sub_type},
+        "subscriptionRegion": region,
+    }
     try:
-        _signed_post(
-            f"https://codewhisperer.{region}.amazonaws.com/",
-            "AmazonQDeveloperService.UpdateAssignment", "q", region,
-            {"principalId": user_id, "principalType": "USER", "subscriptionType": sub_type},
-            credentials,
-        )
+        _signed_post(_us_url(region), _us_target("UpdateClaim"), _US_SVC,
+                     region, payload, credentials)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode()
-        # Kiro 控制面对「订阅尚未激活(PENDING)的账号」做变更会返回
-        # AccessDeniedException「your account is not authorized」——这是业务时序限制，
-        # 非 IAM 权限问题（EC2 最小权限 Role 实测：同账号 Create 成功、对已订阅再操作即被拒）。
-        # 翻译成用户可理解的提示。
-        if "AccessDeniedException" in body or exc.code in (400, 403):
-            raise RuntimeError(
-                "升级失败：该账号订阅尚未激活（PENDING），暂不能变更套餐。"
-                "请待用户首次登录 Kiro 激活订阅后再升级。"
-            ) from exc
-        raise RuntimeError(f"UpdateAssignment failed: HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(f"UpdateClaim failed: HTTP {exc.code}: {body}") from exc
 
 
 def _delete_assignment(user_id: str, credentials, region: str) -> None:
-    """取消订阅。ResourceNotFound=已无订阅(幂等)。"""
+    """取消订阅（Claim 模型）。先 DeleteClaim 退订，再 DeleteApplicationAssignment
+    解除 application 绑定。找不到 claim 视为已无订阅(幂等)。"""
+    claim = _find_claim(user_id, credentials, region)
+    if claim:
+        try:
+            _signed_post(_us_url(region), _us_target("DeleteClaim"), _US_SVC, region,
+                         {"identifier": claim["identifier"], "transaction": True,
+                          "subscriptionRegion": region}, credentials)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()
+            if "ResourceNotFoundException" not in body:
+                raise RuntimeError(f"DeleteClaim failed: HTTP {exc.code}: {body}") from exc
+    # 解除 application 分配（sso 服务）。已解除/不存在视为幂等。
+    app_arn = _get_kiro_application_arn(credentials, region)
     try:
-        _signed_post(
-            f"https://codewhisperer.{region}.amazonaws.com/",
-            "AmazonQDeveloperService.DeleteAssignment", "q", region,
-            {"principalId": user_id, "principalType": "USER"}, credentials,
-        )
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode()
-        if "ResourceNotFoundException" in body:
-            return
-        raise RuntimeError(f"DeleteAssignment failed: HTTP {exc.code}: {body}") from exc
+        session = get_session()
+        sso = session.client("sso-admin", region_name=region)
+        sso.delete_application_assignment(
+            ApplicationArn=app_arn, PrincipalId=user_id, PrincipalType="USER")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] not in ("ResourceNotFoundException",):
+            raise
 
 
 def _list_subscriptions(credentials, region: str) -> list[dict]:
+    instance_arn = settings.sso_instance_arn or _resolve_instance_arn(
+        get_session().client("sso-admin", region_name=region))
     try:
         raw = _signed_post(
-            f"https://service.user-subscriptions.{region}.amazonaws.com/",
-            "AWSZornControlPlaneService.ListUserSubscriptions", "user-subscriptions",
+            _us_url(region),
+            _us_target("ListUserSubscriptions"), _US_SVC,
             region,
-            {"instanceArn": settings.sso_instance_arn, "maxResults": 1000,
+            {"instanceArn": instance_arn, "maxResults": 1000,
              "subscriptionRegion": region},
             credentials,
         )

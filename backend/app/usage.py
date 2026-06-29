@@ -70,18 +70,18 @@ def _run_query(query: str) -> list[list[str]]:
 def _query_usage_by_user() -> dict:
     """按 userid 聚合用量。返回 {userid: {...}}。"""
     table = _resolve_table()
-    query = f"""
-    SELECT
-        userid,
-        SUM(TRY_CAST(total_messages AS INTEGER)) AS messages,
-        SUM(TRY_CAST(chat_conversations AS INTEGER)) AS conversations,
-        SUM(TRY_CAST(credits_used AS DOUBLE)) AS credits,
-        SUM(TRY_CAST(overage_credits_used AS DOUBLE)) AS overage,
-        MAX(date) AS last_active,
-        COUNT(DISTINCT date) AS active_days
-    FROM {table}
-    GROUP BY userid
-    """
+    # table 名来自配置或 Glue API（非用户输入），无注入风险；
+    # Athena 不支持表名参数化，故用字面插值。
+    select = (
+        "SELECT userid, "
+        "SUM(TRY_CAST(total_messages AS INTEGER)) AS messages, "
+        "SUM(TRY_CAST(chat_conversations AS INTEGER)) AS conversations, "
+        "SUM(TRY_CAST(credits_used AS DOUBLE)) AS credits, "
+        "SUM(TRY_CAST(overage_credits_used AS DOUBLE)) AS overage, "
+        "MAX(date) AS last_active, "
+        "COUNT(DISTINCT date) AS active_days "
+    )
+    query = select + f"FROM {table} GROUP BY userid"  # nosec B608
     out: dict = {}
     for row in _run_query(query):
         uid = (row[0] or "").strip().strip('"').strip("'")

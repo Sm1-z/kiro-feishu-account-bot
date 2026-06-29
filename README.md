@@ -2,7 +2,7 @@
 
 > Kiro 账号自助管理：飞书 OAuth 登录 → Web 自助申请 → 飞书卡片审批（免公网 WS 长连接）
 > → 自动开通 IDC 用户/加组/发密码邮件/Kiro 订阅 → DynamoDB 映射（UserId 锚点）。
-> 部署与联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)；生产部署见 [docs/DEPLOY-PRODUCTION.md](docs/DEPLOY-PRODUCTION.md)；架构图见 [docs/architecture-aws.png](docs/architecture-aws.png)（AWS 图标版，源文件 [docs/architecture-aws.drawio](docs/architecture-aws.drawio)）。
+> 部署与联调清单见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)；架构图见 [docs/architecture-aws.png](docs/architecture-aws.png)（AWS 图标版，源文件 [docs/architecture-aws.drawio](docs/architecture-aws.drawio)）。
 
 ## 核心能力
 
@@ -64,6 +64,5 @@ python -m pytest tests/ -q
 
 1. 建表：`python infra/create_table.py`（凭证走 Role / aws sso）
 2. 绑定 IAM Role，附加 `infra/iam-policy.json`
-3. 本地/飞书联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
-4. **生产 EC2 部署与日常更新见 [docs/DEPLOY-PRODUCTION.md](docs/DEPLOY-PRODUCTION.md)**（systemd + SSM 运维 + Deploy Key + IAM 开通链路权限坑，中英对照）
+3. 部署与端到端联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
 </content>

@@ -1,10 +1,7 @@
 # 真机部署与飞书联调清单 / Local & Feishu Bring-up Checklist
 
-> 从零到端到端跑通的**本地/飞书联调**清单。按顺序执行，每步带验证点。
-> Step-by-step checklist to bring the stack up **locally / for Feishu integration**, with a verify point per step.
->
-> **生产 EC2 的部署与日常更新见 [DEPLOY-PRODUCTION.md](DEPLOY-PRODUCTION.md)**（systemd + SSM + Deploy Key + IAM 权限链路坑）。
-> **For production EC2 deploy & routine updates, see [DEPLOY-PRODUCTION.md](DEPLOY-PRODUCTION.md)** (systemd + SSM + Deploy Key + the IAM provisioning-chain pitfall).
+> 从零到端到端跑通的部署与联调清单。按顺序执行，每步带验证点。
+> Step-by-step checklist to bring the stack up end-to-end, with a verify point per step.
 >
 > 端到端验证覆盖五个落点：IDC 用户 / 加组 / Kiro 订阅 / DynamoDB 映射 / 密码邮件。
 > 下方「踩坑速查」汇总了部署联调中常见的卡点与解法。
@@ -48,8 +45,8 @@ python infra/create_table.py        # 凭证走 aws sso / Role
 
 > ⚠️ 安全基线：全程**不要**在 `.env` 里填 `AWS_ACCESS_KEY_ID/SECRET`。
 >
-> ⚠️ **开通链路权限**：订阅步 `q:CreateAssignment` 由 q 服务代理级联调用 sso/sso-directory/identitystore/user-subscriptions，逐个补 action 抠不全。`infra/iam-policy.json` 已按 namespace 放宽这组权限——详见 [DEPLOY-PRODUCTION.md §5](DEPLOY-PRODUCTION.md)。
-> **Provisioning perms**: the `q:CreateAssignment` step is proxied by the q service and cascades into sso/sso-directory/identitystore/user-subscriptions; a tight least-privilege set is un-enumerable. `infra/iam-policy.json` broadens these by namespace — see [DEPLOY-PRODUCTION.md §5](DEPLOY-PRODUCTION.md).
+> ⚠️ **开通链路权限**：订阅步 `q:CreateAssignment` 由 q 服务代理级联调用 sso/sso-directory/identitystore/user-subscriptions，逐个补 action 抠不全，`infra/iam-policy.json` 已按 namespace 放宽这组权限。
+> **Provisioning perms**: the `q:CreateAssignment` step is proxied by the q service and cascades into sso/sso-directory/identitystore/user-subscriptions; a tight least-privilege set is un-enumerable, so `infra/iam-policy.json` broadens these by namespace.
 
 ---
 

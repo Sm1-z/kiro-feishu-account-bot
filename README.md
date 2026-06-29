@@ -66,6 +66,12 @@ python -m pytest tests/ -q
 2. 绑定 IAM Role，附加 `infra/iam-policy.json`
 3. 部署与端到端联调步骤见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
 
+## Disclaimer
+
+This is sample code, for non-production usage. You should work with your security
+and legal teams to meet your organizational security, regulatory and compliance
+requirements before deployment.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.

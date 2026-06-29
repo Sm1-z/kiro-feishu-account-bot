@@ -15,16 +15,16 @@
 
         <!-- ===== Lane: 用户 / 飞书 ===== -->
         <mxCell id="lane_user" value="① 用户 &amp; 飞书 / User &amp; Feishu" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;verticalAlign=top;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="110" width="280" height="430" as="geometry" />
+          <mxGeometry x="40" y="110" width="280" height="470" as="geometry" />
         </mxCell>
-        <mxCell id="user" value="申请人 / Applicant&#10;（飞书账号 / Feishu user）" style="shape=umlActor;verticalLabelPosition=bottom;html=1;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="90" y="160" width="40" height="80" as="geometry" />
+        <mxCell id="user" value="申请人&#10;Applicant" style="shape=umlActor;verticalLabelPosition=bottom;html=1;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="95" y="170" width="40" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="admin" value="审批人 / Approver&#10;（飞书手机端可批 / mobile）" style="shape=umlActor;verticalLabelPosition=bottom;html=1;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
-          <mxGeometry x="220" y="160" width="40" height="80" as="geometry" />
+        <mxCell id="admin" value="审批人（手机可批）&#10;Approver (mobile)" style="shape=umlActor;verticalLabelPosition=bottom;html=1;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="225" y="170" width="40" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="feishu" value="飞书开放平台 / Feishu Open Platform&#10;&#10;• OAuth 登录 / login&#10;• 审批卡片 / approval cards&#10;• WS 长连接回调（card.action.trigger）&#10;  WS callback — 免公网 / no public ingress" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="320" width="220" height="160" as="geometry" />
+        <mxCell id="feishu" value="飞书开放平台 / Feishu Open Platform&#10;&#10;• OAuth 登录 / login&#10;• 审批卡片 / approval cards&#10;• WS 长连接回调 / WS callback&#10;  (card.action.trigger)&#10;• 免公网 / no public ingress" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="350" width="240" height="200" as="geometry" />
         </mxCell>
 
         <!-- ===== Lane: EC2 ===== -->
@@ -98,18 +98,15 @@
         <mxCell id="github" value="GitHub (private)&#10;Sm1-z/kiro-feishu-account-bot&#10;Deploy Key（只读 / read-only）&#10;更新：git reset --hard origin/main&#10;（历史重写过，不能 pull）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="70" y="790" width="220" height="100" as="geometry" />
         </mxCell>
-        <mxCell id="cloudtrail" value="CloudTrail — 权限排查 / authz debug&#10;lookup-events（看 invokedBy）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="350" width="0" height="0" as="geometry" />
-        </mxCell>
 
         <!-- ===== Flows ===== -->
         <!-- user -> frontend (login/apply) -->
-        <mxCell id="e1" style="endArrow=classic;html=1;rounded=1;strokeColor=#6c8ebf;fontSize=10;" edge="1" parent="1" source="user" target="frontend">
+        <mxCell id="e1" style="endArrow=classic;html=1;rounded=1;strokeColor=#6c8ebf;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="user" target="frontend">
           <mxGeometry relative="1" as="geometry" />
-          <mxArray as="points"><mxPoint x="110" y="130" /><mxPoint x="320" y="130" /></mxArray>
+          <mxArray as="points"><mxPoint x="115" y="285" /><mxPoint x="480" y="285" /></mxArray>
         </mxCell>
         <mxCell id="e1lbl" value="1. 登录/申请&#10;login / apply" style="text;html=1;fontSize=10;fillColor=#ffffff;fontColor=#333;" vertex="1" parent="1">
-          <mxGeometry x="180" y="108" width="90" height="28" as="geometry" />
+          <mxGeometry x="335" y="270" width="90" height="28" as="geometry" />
         </mxCell>
 
         <!-- frontend <-> feishu OAuth -->

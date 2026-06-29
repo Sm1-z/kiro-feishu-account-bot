@@ -2,48 +2,15 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "IdentityStoreUserAndGroup",
+      "Sid": "KiroProvisioningServices",
       "Effect": "Allow",
       "Action": [
-        "identitystore:CreateUser",
-        "identitystore:DescribeUser",
-        "identitystore:GetUserId",
-        "identitystore:ListUsers",
-        "identitystore:DeleteUser",
-        "identitystore:CreateGroupMembership",
-        "identitystore:GetGroupId",
-        "identitystore:ListGroups",
-        "identitystore:ListGroupMembershipsForMember"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SsoAdminAppAndAssignment",
-      "Effect": "Allow",
-      "Action": [
-        "sso:ListInstances",
-        "sso:DescribeApplication",
-        "sso:ListApplications",
-        "sso:CreateApplicationAssignment",
-        "sso:DeleteApplicationAssignment",
-        "sso:ListApplicationAssignments"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SsoDirectoryPasswordReset",
-      "Effect": "Allow",
-      "Action": ["sso-directory:UpdatePassword"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "KiroSubscription",
-      "Effect": "Allow",
-      "Action": [
-        "q:CreateAssignment",
-        "q:UpdateAssignment",
-        "q:DeleteAssignment",
-        "user-subscriptions:*"
+        "identitystore:*",
+        "sso:*",
+        "sso-directory:*",
+        "q:*",
+        "user-subscriptions:*",
+        "codewhisperer:*"
       ],
       "Resource": "*"
     },

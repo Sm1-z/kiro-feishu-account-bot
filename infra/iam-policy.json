@@ -40,6 +40,9 @@
       "Sid": "KiroSubscription",
       "Effect": "Allow",
       "Action": [
+        "q:CreateAssignment",
+        "q:UpdateAssignment",
+        "q:DeleteAssignment",
         "user-subscriptions:*"
       ],
       "Resource": "*"

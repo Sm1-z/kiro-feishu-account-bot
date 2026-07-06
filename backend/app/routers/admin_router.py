@@ -111,6 +111,14 @@ def list_accounts(_: CurrentUser = Depends(require_admin)):
     return out
 
 
+@router.get("/overage-cap")
+def overage_cap(_: CurrentUser = Depends(require_admin)):
+    """Overages 超额上限（Service Quotas，USD/订阅）。查询失败返回 cap=None（前端显示 —）。"""
+    from app.quotas import get_overage_cap
+
+    return {"cap": get_overage_cap()}
+
+
 @router.post("/link")
 def manual_link(body: ManualLinkIn, _: CurrentUser = Depends(require_admin)):
     from app.resolver import Resolver

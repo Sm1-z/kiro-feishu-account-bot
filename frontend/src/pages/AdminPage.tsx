@@ -8,7 +8,8 @@ import {
   Typography, Layout, Tabs, Row, Col, Statistic,
 } from 'antd'
 import {
-  adminRequests, approve, reject, getAccounts, ReqItem, AccountRow,
+  adminRequests, approve, reject, getAccounts, getOverageCap,
+  ReqItem, AccountRow, OverageCap,
 } from '../api'
 import { HBarChart, DonutChart } from '../components/MiniCharts'
 
@@ -125,11 +126,14 @@ const roleTag = (r: string) =>
 function AccountsPanel() {
   const [rows, setRows] = useState<AccountRow[]>([])
   const [loading, setLoading] = useState(false)
+  const [cap, setCap] = useState<OverageCap | null>(null)
 
   const load = async () => {
     setLoading(true)
     try { setRows(await getAccounts()) }
     catch { message.error('加载失败') } finally { setLoading(false) }
+    // cap 独立加载，失败不影响账号列表（后端已降级，这里再兜一层）
+    try { setCap(await getOverageCap()) } catch { setCap(null) }
   }
   useEffect(() => { load() }, [])
 
@@ -140,6 +144,8 @@ function AccountsPanel() {
   const totalPeople = people.length
   const totalCredits = rows.reduce((s, r) => s + (r.usage_credits ?? 0), 0)
   const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length
+  // Overages 上限是 profile 级单一值（USD/订阅）；最坏敞口 = 账号数 × 上限
+  const worstOverage = cap != null ? totalAccounts * cap.value : null
 
   // ── 图表数据 ──
   const topByCredits = people.filter((p) => p.credits > 0)
@@ -184,10 +190,35 @@ function AccountsPanel() {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       {/* 指标卡 */}
       <Row gutter={16}>
-        <Col span={6}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
+        <Col span={5}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
+        <Col span={7}>
+          <Card size="small">
+            <Statistic
+              title={
+                <Space size={4}>
+                  超额上限 / 订阅
+                  {cap && (
+                    <Typography.Link href={cap.console_url} target="_blank" style={{ fontSize: 12 }}>
+                      调整
+                    </Typography.Link>
+                  )}
+                </Space>
+              }
+              value={cap != null ? cap.value : '—'}
+              prefix={cap != null ? '$' : undefined}
+              valueStyle={cap == null ? { color: '#ccc' } : undefined}
+            />
+            {worstOverage != null && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                最坏月超额敞口 ${worstOverage.toLocaleString()}（{totalAccounts} 账号 × ${cap!.value}，需在 Kiro 控制台开启 Overages 才生效）。
+                上限只可调高，调低需联系 AWS Support。
+              </Typography.Text>
+            )}
+          </Card>
+        </Col>
       </Row>
 
       {/* 图表 */}

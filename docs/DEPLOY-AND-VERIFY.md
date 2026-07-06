@@ -48,6 +48,20 @@ python infra/create_table.py        # 凭证走 aws sso / Role
 > ⚠️ **开通链路权限**：订阅步 `q:CreateAssignment` 由 q 服务代理级联调用 sso/sso-directory/identitystore/user-subscriptions，逐个补 action 抠不全，`infra/iam-policy.json` 已按 namespace 放宽这组权限。
 > **Provisioning perms**: the `q:CreateAssignment` step is proxied by the q service and cascades into sso/sso-directory/identitystore/user-subscriptions; a tight least-privilege set is un-enumerable, so `infra/iam-policy.json` broadens these by namespace.
 
+### 1.3 Overages 超额上限（可选）
+
+管理页「账号总览」会展示 Kiro Overages 超额上限（Service Quotas: `kiro` / `L-75434B0B`，
+"Maximum allowed overage per Kiro profile"，USD/订阅）与最坏月超额敞口测算。
+
+- [ ] 权限：`infra/iam-policy.json` 的 Sid `KiroOverageQuotaRead`（`servicequotas:GetServiceQuota` + `GetAWSDefaultServiceQuota`，只读）。缺权限不报错，卡片降级显示 —
+- [ ] 该 quota 在 **us-east-1**；Overages 默认关闭，需在 Kiro console → Settings 手动开启后 cap 才实际生效
+
+> ⚠️ **上限只可调高，不可调低**（实测 `RequestServiceQuotaIncrease` 对小于当前值的请求直接拒绝
+> `IllegalArgumentException`）。调低需开 AWS Support case。因此平台只做只读展示，
+> 调整入口是跳转 Service Quotas console 的链接——管理员调高前请确认，这是半单向操作。
+> **Overage cap is increase-only**: requests below the current value are rejected by the API;
+> lowering it requires an AWS Support case. The platform is read-only by design.
+
 ---
 
 ## 阶段 2 — 飞书应用

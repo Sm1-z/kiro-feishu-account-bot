@@ -35,6 +35,15 @@
       ]
     },
     {
+      "Sid": "KiroOverageQuotaRead",
+      "Effect": "Allow",
+      "Action": [
+        "servicequotas:GetServiceQuota",
+        "servicequotas:GetAWSDefaultServiceQuota"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "KiroUsageAnalyticsRead",
       "Effect": "Allow",
       "Action": [

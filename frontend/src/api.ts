@@ -85,4 +85,14 @@ export interface AccountRow {
 export const getAccounts = () =>
   api.get<AccountRow[]>('/api/admin/accounts').then((r) => r.data)
 
+export interface OverageCap {
+  value: number
+  quota_name: string
+  adjustable: boolean
+  region: string
+  console_url: string
+}
+export const getOverageCap = () =>
+  api.get<{ cap: OverageCap | null }>('/api/admin/overage-cap').then((r) => r.data.cap)
+
 export default api

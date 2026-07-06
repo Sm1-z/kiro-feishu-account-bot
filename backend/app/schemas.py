@@ -29,6 +29,10 @@ class ReviewIn(BaseModel):
     comment: str = ""
 
 
+class OverageCapIn(BaseModel):
+    desired_value: float = Field(gt=0)
+
+
 class ManualLinkIn(BaseModel):
     kiro_user_id: str
     feishu_open_id: str

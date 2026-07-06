@@ -47,6 +47,7 @@ REJECTED = "rejected"
 APPLY = "apply"
 UPGRADE = "upgrade"
 QUOTA_INCREASE = "quota_increase"
+OVERAGE_CAP = "overage_cap"  # 管理员调高 Overages 上限（即时执行，无审批流，纯审计记录）
 
 
 def _now() -> int:

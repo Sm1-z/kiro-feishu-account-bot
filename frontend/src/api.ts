@@ -76,14 +76,18 @@ export interface AccountRow {
   tier: string
   status: string
   account_role: string
+  live_synced: boolean
+  live_status: string | null
+  live_tier: string | null
   usage_messages: number | null
   usage_credits: number | null
   usage_conversations: number | null
   usage_last_active: string | null
   usage_active_days: number | null
 }
-export const getAccounts = () =>
-  api.get<AccountRow[]>('/api/admin/accounts').then((r) => r.data)
+export const getAccounts = (force = false) =>
+  api.get<AccountRow[]>('/api/admin/accounts', { params: force ? { force: true } : {} })
+    .then((r) => r.data)
 
 export interface OverageCap {
   value: number
@@ -92,7 +96,18 @@ export interface OverageCap {
   region: string
   console_url: string
 }
+export interface OverageCapPending {
+  desired_value: number
+  status: string
+  requested_at: string
+}
+export interface OverageCapInfo {
+  cap: OverageCap | null
+  pending: OverageCapPending | null
+}
 export const getOverageCap = () =>
-  api.get<{ cap: OverageCap | null }>('/api/admin/overage-cap').then((r) => r.data.cap)
+  api.get<OverageCapInfo>('/api/admin/overage-cap').then((r) => r.data)
+export const raiseOverageCap = (desired_value: number) =>
+  api.post('/api/admin/overage-cap', { desired_value })
 
 export default api

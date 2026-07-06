@@ -15,7 +15,7 @@ from app.approval import ApprovalService
 from app.auth import CurrentUser, require_admin
 from app.mapping_store import MappingStore
 from app.request_store import RequestStore
-from app.schemas import ManualLinkIn, ReviewIn
+from app.schemas import ManualLinkIn, OverageCapIn, ReviewIn
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -69,12 +69,17 @@ def list_users(_: CurrentUser = Depends(require_admin)):
 
 
 @router.get("/accounts")
-def list_accounts(_: CurrentUser = Depends(require_admin)):
-    """账号总览：全量映射 + JOIN Kiro 用量（对接 Analytics Dashboard）。
+def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
+    """账号总览：全量映射 + JOIN 订阅实况 + JOIN Kiro 用量（对接 Analytics Dashboard）。
 
-    关联键 = kiro_user_id = Athena 表 userid。用量在应用层拼接，
-    Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
+    - 映射表的 status/tier 是平台操作时的快照；管理员在 AWS 控制台直接退订/改套餐
+      不会回写映射表，所以每次都拉 ListUserSubscriptions 实况（live_* 字段），
+      前端以 live 为准展示、快照留作对照。实况拉取失败时 live_synced=False 降级。
+    - 用量关联键 = kiro_user_id = Athena 表 userid，应用层拼接；
+      Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
+    - force=true 时绕过用量 TTL 缓存强制重查（刷新按钮用）。
     """
+    from app.provisioner import live_subscription_map
     from app.usage import get_usage_by_user
 
     store = MappingStore()
@@ -86,11 +91,18 @@ def list_accounts(_: CurrentUser = Depends(require_admin)):
             break
         kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
-    usage = get_usage_by_user()  # {userid: {...}}，失败返回 {}
+    live_synced = True
+    try:
+        live = live_subscription_map()  # {user_id: {status, tier}}
+    except Exception:
+        live, live_synced = {}, False
+
+    usage = get_usage_by_user(force=force)  # {userid: {...}}，失败返回 {}
     out = []
     for it in items:
         uid = it.get("kiro_user_id", "")
         u = usage.get(uid)
+        lv = live.get(uid)
         out.append({
             "kiro_user_id": uid,
             "feishu_open_id": it.get("feishu_open_id", ""),
@@ -101,6 +113,10 @@ def list_accounts(_: CurrentUser = Depends(require_admin)):
             "tier": it.get("tier", ""),
             "status": it.get("status", ""),
             "account_role": it.get("account_role", ""),
+            # 订阅实况（live_synced=False 时不可信，前端回退快照）
+            "live_synced": live_synced,
+            "live_status": lv["status"] if lv else None,  # None = 无订阅（已退订/未订阅）
+            "live_tier": lv["tier"] if lv else None,
             # 用量（None = 无数据/未配置；0 = 有数据但未使用，前端可区分）
             "usage_messages": u["messages"] if u else None,
             "usage_credits": round(u["credits"], 2) if u else None,
@@ -114,9 +130,38 @@ def list_accounts(_: CurrentUser = Depends(require_admin)):
 @router.get("/overage-cap")
 def overage_cap(_: CurrentUser = Depends(require_admin)):
     """Overages 超额上限（Service Quotas，USD/订阅）。查询失败返回 cap=None（前端显示 —）。"""
-    from app.quotas import get_overage_cap
+    from app.quotas import get_overage_cap, get_pending_cap_request
 
-    return {"cap": get_overage_cap()}
+    cap = get_overage_cap()
+    pending = None
+    if cap is not None:
+        try:
+            pending = get_pending_cap_request()
+        except Exception:
+            pending = None  # pending 查询失败不影响 cap 展示
+    return {"cap": cap, "pending": pending}
+
+
+@router.post("/overage-cap")
+def raise_overage_cap(body: OverageCapIn, admin: CurrentUser = Depends(require_admin)):
+    """调高 Overages 上限（increase-only）。即时执行，落 requests 表做审计。"""
+    from app import request_store as RS
+    from app.quotas import get_overage_cap, request_cap_increase
+
+    before = get_overage_cap()
+    try:
+        result = request_cap_increase(body.desired_value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    # 审计：谁、何时、从多少调到多少。执行已完成，直接落 executed。
+    RS.RequestStore().create(RS.Request(
+        user_open_id=admin.open_id, user_name=admin.name, type=RS.OVERAGE_CAP,
+        status=RS.EXECUTED, reviewer_open_id=admin.open_id,
+        payload={"from": str(before["value"] if before else "?"),
+                 "to": str(body.desired_value)},
+        result={"status": result["status"], "request_id": result["request_id"]},
+    ))
+    return result
 
 
 @router.post("/link")

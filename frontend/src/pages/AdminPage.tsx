@@ -5,18 +5,18 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Space, Segmented, message, Popconfirm,
-  Typography, Layout, Tabs, Row, Col, Statistic,
+  Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert,
 } from 'antd'
 import {
-  adminRequests, approve, reject, getAccounts, getOverageCap,
-  ReqItem, AccountRow, OverageCap,
+  adminRequests, approve, reject, getAccounts, getOverageCap, raiseOverageCap,
+  ReqItem, AccountRow, OverageCapInfo,
 } from '../api'
 import { HBarChart, DonutChart } from '../components/MiniCharts'
 
 const { Header, Content } = Layout
 const { Title } = Typography
 
-const TYPE_LABEL: any = { apply: '开通', upgrade: '升级', quota_increase: '配额' }
+const TYPE_LABEL: any = { apply: '开通', upgrade: '升级', quota_increase: '配额', overage_cap: '超额上限' }
 const STATUS_COLOR: any = {
   pending: 'orange', approved: 'blue', executed: 'green', failed: 'red', rejected: 'default',
 }
@@ -126,16 +126,39 @@ const roleTag = (r: string) =>
 function AccountsPanel() {
   const [rows, setRows] = useState<AccountRow[]>([])
   const [loading, setLoading] = useState(false)
-  const [cap, setCap] = useState<OverageCap | null>(null)
+  const [capInfo, setCapInfo] = useState<OverageCapInfo>({ cap: null, pending: null })
+  const [capModalOpen, setCapModalOpen] = useState(false)
+  const [capTarget, setCapTarget] = useState<number | null>(null)
+  const [capSubmitting, setCapSubmitting] = useState(false)
 
-  const load = async () => {
-    setLoading(true)
-    try { setRows(await getAccounts()) }
-    catch { message.error('加载失败') } finally { setLoading(false) }
+  const loadCap = async () => {
     // cap 独立加载，失败不影响账号列表（后端已降级，这里再兜一层）
-    try { setCap(await getOverageCap()) } catch { setCap(null) }
+    try { setCapInfo(await getOverageCap()) } catch { setCapInfo({ cap: null, pending: null }) }
+  }
+  const load = async (force = false) => {
+    setLoading(true)
+    try { setRows(await getAccounts(force)) }
+    catch { message.error('加载失败') } finally { setLoading(false) }
+    loadCap()
   }
   useEffect(() => { load() }, [])
+
+  const cap = capInfo.cap
+  const capPending = capInfo.pending
+
+  const submitCapRaise = async () => {
+    if (capTarget == null) return
+    setCapSubmitting(true)
+    try {
+      await raiseOverageCap(capTarget)
+      message.success('已提交调高申请（小额通常即时生效）')
+      setCapModalOpen(false)
+      setCapTarget(null)
+      loadCap()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '提交失败')
+    } finally { setCapSubmitting(false) }
+  }
 
   const people = aggregateByPerson(rows)
 
@@ -152,18 +175,29 @@ function AccountsPanel() {
     .slice(0, 8).map((p) => ({ label: p.feishu_name, value: +p.credits.toFixed(1) }))
   const tierDist = (() => {
     const m = new Map<string, number>()
-    for (const r of rows) { const t = r.tier || '未知'; m.set(t, (m.get(t) || 0) + 1) }
+    for (const r of rows) {
+      const t = r.live_synced ? (r.live_tier || '无订阅') : (r.tier || '未知')
+      m.set(t, (m.get(t) || 0) + 1)
+    }
     return [...m.entries()].map(([label, value]) => ({ label, value }))
   })()
 
   // ── 子账号明细（展开）──
+  // Tier/状态优先展示订阅实况（控制台直接退订/改套餐不回写映射表，快照会滞后）
   const subCols = [
     { title: '用户名', dataIndex: 'kiro_username' },
     { title: '主/副', dataIndex: 'account_role', render: roleTag },
-    { title: 'Tier', dataIndex: 'tier', render: (t: string) => t ? <Tag color="blue">{t}</Tag> : '—' },
+    { title: 'Tier', dataIndex: 'live_tier', render: (t: string | null, r: AccountRow) => {
+      if (!r.live_synced) return r.tier ? <Tag color="blue">{r.tier}</Tag> : '—'
+      return t ? <Tag color="blue">{t}</Tag> : <span style={{ color: '#ccc' }}>—</span>
+    } },
     { title: '分组', dataIndex: 'team' },
-    { title: '状态', dataIndex: 'status', render: (s: string) =>
-      <Tag color={s === 'active' ? 'green' : 'default'}>{s}</Tag> },
+    { title: '订阅状态', dataIndex: 'live_status', render: (s: string | null, r: AccountRow) => {
+      if (!r.live_synced)
+        return <Tag color={r.status === 'active' ? 'green' : 'default'}>{r.status}（快照）</Tag>
+      if (!s) return <Tag color="red">无订阅</Tag>
+      return <Tag color={s === 'ACTIVE' ? 'green' : s === 'PENDING' ? 'orange' : 'default'}>{s}</Tag>
+    } },
     { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits },
     { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const, render: fmtNum },
     { title: '最后活跃', dataIndex: 'usage_last_active',
@@ -200,10 +234,15 @@ function AccountsPanel() {
               title={
                 <Space size={4}>
                   超额上限 / 订阅
-                  {cap && (
-                    <Typography.Link href={cap.console_url} target="_blank" style={{ fontSize: 12 }}>
-                      调整
+                  {cap && !capPending && (
+                    <Typography.Link onClick={() => setCapModalOpen(true)} style={{ fontSize: 12 }}>
+                      调高
                     </Typography.Link>
+                  )}
+                  {capPending && (
+                    <Tag color="orange" style={{ fontSize: 11, marginLeft: 4 }}>
+                      审批中 → ${capPending.desired_value}
+                    </Tag>
                   )}
                 </Space>
               }
@@ -221,6 +260,49 @@ function AccountsPanel() {
         </Col>
       </Row>
 
+      {/* 调高超额上限 */}
+      <Modal
+        title="调高超额上限"
+        open={capModalOpen}
+        onCancel={() => { setCapModalOpen(false); setCapTarget(null) }}
+        footer={[
+          <Button key="cancel" onClick={() => { setCapModalOpen(false); setCapTarget(null) }}>取消</Button>,
+          <Popconfirm key="ok" title={`确认调高至 $${capTarget ?? '?'}？此操作不可自助回退`}
+            onConfirm={submitCapRaise} disabled={capTarget == null}>
+            <Button type="primary" danger loading={capSubmitting} disabled={capTarget == null}>
+              确认调高
+            </Button>
+          </Popconfirm>,
+        ]}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert type="warning" showIcon message="上限只可调高，不可调低"
+            description="提交后无法在平台或 AWS 控制台自助降回，调低需开 AWS Support case。请确认新值。" />
+          <div>
+            当前值：<b>${cap?.value}</b> / 订阅（profile 级，对所有用户生效）
+            {cap != null && (
+              <div style={{ color: '#999', fontSize: 12 }}>
+                单次最多调高至当前值 2 倍（${cap.value * 2}）；新的最坏月超额敞口 = 账号数 × 新上限
+              </div>
+            )}
+          </div>
+          <InputNumber
+            style={{ width: '100%' }}
+            prefix="$"
+            placeholder={cap != null ? `大于 ${cap.value}，不超过 ${cap.value * 2}` : ''}
+            min={cap != null ? cap.value + 1 : 1}
+            max={cap != null ? cap.value * 2 : undefined}
+            value={capTarget}
+            onChange={(v) => setCapTarget(v)}
+          />
+          {capTarget != null && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              调高后最坏月超额敞口：${(totalAccounts * capTarget).toLocaleString()}（{totalAccounts} 账号 × ${capTarget}）
+            </Typography.Text>
+          )}
+        </Space>
+      </Modal>
+
       {/* 图表 */}
       <Row gutter={16}>
         <Col span={14}>
@@ -237,10 +319,11 @@ function AccountsPanel() {
 
       {/* 按人聚合表（可展开下钻子账号） */}
       <Card size="small" title="按飞书用户聚合（展开看名下各账号）"
-        extra={<Button size="small" onClick={load}>刷新</Button>}>
+        extra={<Button size="small" loading={loading} onClick={() => load(true)}>刷新</Button>}>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
           一人多账号已合并为一行，Credits/消息为名下所有账号汇总；点行首 ▸ 展开看每个子账号。
-          用量来自 Kiro Analytics（Athena，约每日更新、缓存 5 分钟），— 表示暂无用量数据。
+          Tier/订阅状态为 AWS 实时数据（控制台的退订/改套餐也会反映）；
+          用量来自 Kiro Analytics（Athena，约每日更新），点「刷新」强制重查。— 表示暂无数据。
         </Typography.Paragraph>
         <Table
           rowKey="feishu_open_id"

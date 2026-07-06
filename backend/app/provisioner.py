@@ -315,6 +315,21 @@ def cancel(username: str) -> SimpleResult:
         return SimpleResult(success=False, error=str(exc))
 
 
+def live_subscription_map() -> dict:
+    """全量订阅实况 {user_id: {"status": ACTIVE/PENDING/..., "tier": pro/...}}。
+
+    供账号总览展示实时状态——DynamoDB 映射里的 status/tier 是平台操作时的快照，
+    管理员在 AWS 控制台直接退订/改套餐不会回写映射表，以此接口为准。
+    """
+    creds = get_frozen_credentials()
+    out: dict = {}
+    for sub in _list_subscriptions(creds, settings.aws_region):
+        uid = sub.get("principal", {}).get("user", "")
+        if uid:
+            out[uid] = {"status": sub.get("status", ""), "tier": _tier_of_subscription(sub)}
+    return out
+
+
 def query_tier(username: str) -> str | None:
     """查询用户当前 tier（pro/pro+/power）或 None。"""
     region = settings.aws_region

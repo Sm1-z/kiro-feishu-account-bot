@@ -8,7 +8,8 @@ import {
   Typography, Layout, Empty,
 } from 'antd'
 import {
-  getMe, applyAccount, upgradeAccount, myRequests, getGroups, Me, Account, ReqItem,
+  getMe, applyAccount, upgradeAccount, myRequests, getGroups, isAccountActive,
+  Me, Account, ReqItem,
 } from '../api'
 
 const { Header, Content } = Layout
@@ -35,18 +36,21 @@ export default function Dashboard() {
   const [form] = Form.useForm()
   const [upForm] = Form.useForm()
 
+  const [refreshing, setRefreshing] = useState(false)
   const load = async () => {
+    setRefreshing(true)
     try {
       const m = await getMe()
       setMe(m)
       setReqs(await myRequests())
-    } catch { message.error('加载失败') }
+    } catch { message.error('加载失败') } finally { setRefreshing(false) }
   }
   useEffect(() => { load() }, [])
   // 分组从 IDC 动态拉取（失败时后端已降级为默认组）
   useEffect(() => { getGroups().then(setGroups).catch(() => setGroups([])) }, [])
 
-  const quotaFull = me ? me.accounts.filter(a => a.status === 'active').length >= me.quota : false
+  const activeCount = me ? me.accounts.filter(isAccountActive).length : 0
+  const quotaFull = me ? activeCount >= me.quota : false
 
   const submitApply = async () => {
     const v = await form.validateFields()
@@ -66,17 +70,27 @@ export default function Dashboard() {
     } catch (e: any) { message.error(e.response?.data?.detail || '提交失败') }
   }
 
+  // 套餐/状态展示订阅实况（控制台退订/改套餐不回写映射表，快照会滞后）
   const acctCols = [
     { title: '用户名', dataIndex: 'kiro_username' },
     { title: '邮箱', dataIndex: 'kiro_email' },
     { title: '分组', dataIndex: 'team' },
-    { title: '套餐', dataIndex: 'tier', render: tierTag },
+    { title: '套餐', render: (_: any, r: Account) =>
+      tierTag(r.live_synced ? (r.live_tier || '') : r.tier) },
     { title: '类型', dataIndex: 'account_role', render: roleTag },
-    { title: '状态', dataIndex: 'status', render: (s: string) =>
-      <Tag color={s === 'active' ? 'green' : 'default'}>{s}</Tag> },
+    { title: '状态', render: (_: any, r: Account) => {
+      if (!r.live_synced)
+        return <Tag color={r.status === 'active' ? 'green' : 'default'}>{r.status}（快照）</Tag>
+      if (!r.live_status) return <Tag color="red">无订阅</Tag>
+      const c = { ACTIVE: 'green', PENDING: 'orange' } as any
+      return <Tag color={c[r.live_status] || 'default'}>{r.live_status}</Tag>
+    } },
     { title: '操作', render: (_: any, r: Account) =>
-      <Button size="small" disabled={r.status !== 'active'}
-        onClick={() => { setUpgradeTarget(r); upForm.setFieldsValue({ target_tier: r.tier }) }}>
+      <Button size="small" disabled={!isAccountActive(r)}
+        onClick={() => {
+          setUpgradeTarget(r)
+          upForm.setFieldsValue({ target_tier: (r.live_synced ? r.live_tier : r.tier) || r.tier })
+        }}>
         升级套餐
       </Button> },
   ]
@@ -104,14 +118,17 @@ export default function Dashboard() {
       </Header>
       <Content style={{ padding: 24 }}>
         <Card
-          title={`我的 Kiro 账号（${me?.accounts.filter(a => a.status === 'active').length || 0} / ${me?.quota || 0}）`}
+          title={`我的 Kiro 账号（${activeCount} / ${me?.quota || 0}）`}
           extra={
-            <Button type="primary" disabled={quotaFull} onClick={() => {
-              form.setFieldsValue({ username: me?.suggested_username })
-              setApplyOpen(true)
-            }}>
-              {quotaFull ? '配额已满' : '申请账号'}
-            </Button>
+            <Space>
+              <Button loading={refreshing} onClick={load}>刷新</Button>
+              <Button type="primary" disabled={quotaFull} onClick={() => {
+                form.setFieldsValue({ username: me?.suggested_username })
+                setApplyOpen(true)
+              }}>
+                {quotaFull ? '配额已满' : '申请账号'}
+              </Button>
+            </Space>
           }
           style={{ marginBottom: 24 }}
         >

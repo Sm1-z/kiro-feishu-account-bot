@@ -32,7 +32,14 @@ export interface Account {
   team: string
   status: string
   account_role: string
+  live_synced: boolean
+  live_status: string | null
+  live_tier: string | null
 }
+
+// 有效状态：实况优先（控制台退订不回写映射表，快照会滞后）
+export const isAccountActive = (a: Account) =>
+  a.live_synced ? a.live_status != null : a.status === 'active'
 
 export interface Me {
   open_id: string

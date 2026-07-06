@@ -93,7 +93,7 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
 
     live_synced = True
     try:
-        live = live_subscription_map()  # {user_id: {status, tier}}
+        live = live_subscription_map(force=force)  # {user_id: {status, tier}}
     except Exception:
         live, live_synced = {}, False
 

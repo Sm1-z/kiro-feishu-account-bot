@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -315,18 +316,31 @@ def cancel(username: str) -> SimpleResult:
         return SimpleResult(success=False, error=str(exc))
 
 
-def live_subscription_map() -> dict:
+_LIVE_CACHE_TTL = 60  # 秒；用户端 /me 每次进页都会打，不能每次全量拉订阅
+_live_cache: dict = {"ts": 0.0, "data": None}
+_live_lock = threading.Lock()
+
+
+def live_subscription_map(force: bool = False) -> dict:
     """全量订阅实况 {user_id: {"status": ACTIVE/PENDING/..., "tier": pro/...}}。
 
-    供账号总览展示实时状态——DynamoDB 映射里的 status/tier 是平台操作时的快照，
+    供账号页展示实时状态——DynamoDB 映射里的 status/tier 是平台操作时的快照，
     管理员在 AWS 控制台直接退订/改套餐不会回写映射表，以此接口为准。
+    短 TTL 缓存；force=True（管理端刷新按钮）强制重拉。失败抛异常由调用方降级。
     """
+    now = time.time()
+    with _live_lock:
+        if not force and (now - _live_cache["ts"]) < _LIVE_CACHE_TTL \
+           and _live_cache["data"] is not None:
+            return _live_cache["data"]
     creds = get_frozen_credentials()
     out: dict = {}
     for sub in _list_subscriptions(creds, settings.aws_region):
         uid = sub.get("principal", {}).get("user", "")
         if uid:
             out[uid] = {"status": sub.get("status", ""), "tier": _tier_of_subscription(sub)}
+    with _live_lock:
+        _live_cache["ts"], _live_cache["data"] = time.time(), out
     return out
 
 

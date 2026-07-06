@@ -41,14 +41,33 @@ def feishu_callback(code: str, state: str = ""):
 
 @router.get("/me")
 def me(user: CurrentUser = Depends(current_user)):
+    from app.provisioner import live_subscription_map
+
     resolver = Resolver()
     accounts = resolver.accounts_of(user.open_id)
     taken = resolver.store.all_usernames()
+
+    # JOIN 订阅实况：映射表的 tier/status 是平台操作时的快照，控制台直接
+    # 退订/改套餐不回写，以实况为准展示（拉取失败降级用快照，live_synced=False）。
+    live_synced = True
+    try:
+        live = live_subscription_map()
+    except Exception:
+        live, live_synced = {}, False
+    out = []
+    for a in accounts:
+        d = dict(a.__dict__)
+        lv = live.get(a.kiro_user_id)
+        d["live_synced"] = live_synced
+        d["live_status"] = lv["status"] if lv else None  # None = 无订阅
+        d["live_tier"] = lv["tier"] if lv else None
+        out.append(d)
+
     return {
         "open_id": user.open_id,
         "name": user.name,
         "is_admin": user.is_admin,
         "quota": settings.default_account_quota,
-        "accounts": [a.__dict__ for a in accounts],
+        "accounts": out,
         "suggested_username": suggest_new_username(user.name, taken),
     }

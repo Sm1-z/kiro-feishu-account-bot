@@ -278,6 +278,7 @@ def provision(username: str, email: str, given_name: str, family_name: str,
             result.error, result.error_step = f"订阅 Kiro 失败: {exc}", "kiro_subscribe"
             return result
 
+        _invalidate_live_cache()
         result.success = True
         return result
     except Exception as exc:
@@ -297,7 +298,30 @@ def upgrade(username: str, tier: str) -> SimpleResult:
         id_store = get_identity_store_id(session)
         idc = session.client("identitystore", region_name=region)
         user_id = _get_user_id_by_name(idc, id_store, username)
-        _update_assignment(user_id, sub_type, get_frozen_credentials(), region)
+        creds = get_frozen_credentials()
+
+        # 按订阅实况决定动作：已取消/无订阅 → 重新订阅（CreateAssignment）。
+        # 对 CANCELLED 订阅调 UpdateAssignment 服务端返回成功但不生效（实测），
+        # 会造成申请 executed 而实际没变的假象。实况不可得时按原变更路径走。
+        live_status = "UNKNOWN"
+        try:
+            sub = live_subscription_map(force=True).get(user_id)
+            live_status = sub["status"] if sub else None
+        except Exception:
+            pass
+
+        if live_status is None or live_status == "CANCELLED":
+            created = _create_assignment(user_id, sub_type, creds, region)
+            if not created:
+                # Conflict = 已取消订阅仍占位（账期到月底），服务端拒绝重订
+                return SimpleResult(success=False, error=(
+                    "重新订阅未生效：原订阅已取消但账期未结（保留到月底）。"
+                    "请月初重试，或联系管理员在 Kiro 控制台处理。"))
+            _invalidate_live_cache()
+            return SimpleResult(success=True)
+
+        _update_assignment(user_id, sub_type, creds, region)
+        _invalidate_live_cache()
         return SimpleResult(success=True)
     except Exception as exc:
         return SimpleResult(success=False, error=str(exc))
@@ -342,6 +366,12 @@ def live_subscription_map(force: bool = False) -> dict:
     with _live_lock:
         _live_cache["ts"], _live_cache["data"] = time.time(), out
     return out
+
+
+def _invalidate_live_cache() -> None:
+    """订阅变更（开通/升级/取消）后调用，让下次实况读取拿到新状态。"""
+    with _live_lock:
+        _live_cache["ts"] = 0.0
 
 
 def query_tier(username: str) -> str | None:
@@ -408,4 +438,5 @@ def bulk_cancel(user_ids: list[str]) -> list[dict]:
             results.append({"user_id": uid, "success": True, "error": ""})
         except Exception as exc:
             results.append({"user_id": uid, "success": False, "error": str(exc)})
+    _invalidate_live_cache()
     return results

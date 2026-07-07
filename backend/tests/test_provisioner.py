@@ -160,3 +160,75 @@ def test_bulk_cancel_also_deletes_mapping():
     mapping.delete.assert_any_call("uid-1")
     mapping.delete.assert_any_call("uid-2")
     assert mapping.delete.call_count == 2
+
+
+# ---- upgrade：按订阅实况分流（CANCELLED 重订 vs ACTIVE 变更）----
+
+def _upgrade_env(live_status):
+    """构造 upgrade 依赖：IDC 返回固定 user_id，实况返回指定状态。"""
+    idc = MagicMock()
+    idc.get_user_id.return_value = {"UserId": "uid-1"}
+    session = MagicMock()
+    session.client.return_value = idc
+    live = {"uid-1": {"status": live_status, "tier": "pro max"}} if live_status else {}
+    return session, live
+
+
+def test_upgrade_cancelled_goes_recreate():
+    """已取消订阅 → 走 CreateAssignment 重订，不走 UpdateAssignment。
+
+    对 CANCELLED 订阅调 UpdateAssignment 服务端返回成功但不生效（实测），
+    原实现会把申请标成 executed 而实际没变。
+    """
+    session, live = _upgrade_env("CANCELLED")
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment", return_value=True) as ca, \
+         patch.object(P, "_update_assignment") as ua:
+        r = P.upgrade("zhangsan", "pro")
+    assert r.success is True
+    ca.assert_called_once()
+    ua.assert_not_called()
+
+
+def test_upgrade_cancelled_conflict_reports_billing_hold():
+    """重订被 Conflict 拒（原订阅账期未结占位）→ 失败并给出可读提示。"""
+    session, live = _upgrade_env("CANCELLED")
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment", return_value=False):
+        r = P.upgrade("zhangsan", "pro")
+    assert r.success is False
+    assert "账期" in r.error
+
+
+def test_upgrade_active_goes_update():
+    """正常 ACTIVE 订阅 → 仍走 UpdateAssignment 变更路径。"""
+    session, live = _upgrade_env("ACTIVE")
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment") as ca, \
+         patch.object(P, "_update_assignment") as ua:
+        r = P.upgrade("zhangsan", "pro")
+    assert r.success is True
+    ua.assert_called_once()
+    ca.assert_not_called()
+
+
+def test_upgrade_no_subscription_goes_recreate():
+    """映射有账号但无任何订阅（控制台已退）→ 走 CreateAssignment。"""
+    session, live = _upgrade_env(None)
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment", return_value=True) as ca:
+        r = P.upgrade("zhangsan", "pro")
+    assert r.success is True
+    ca.assert_called_once()

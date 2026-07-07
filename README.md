@@ -15,6 +15,32 @@
 | 账号治理 | UserId 锚点 + 一人多账号（主/副）+ DynamoDB 映射为唯一真相源 |
 | 用量看板 | 对接 Kiro Analytics，管理端账号总览按人聚合 + 用量图表 |
 | 超额治理 | Overages 上限展示 + 应用内调高（2 倍护栏 + 审计）+ 最坏月超额敞口测算 |
+| 存量导入 | 扫描 IDC 游离账号，邮箱/拼音双级归属建议，绑定即纳管 |
+| 分组管理 | 管理端直接新建 IDC Group，申请表单实时生效 |
+
+## 界面预览
+
+> 以下截图基于演示数据（moto mock，`backend/demo_server.py` 可一键复现）。
+
+**员工自助**：飞书 OAuth 登录 → 查看名下账号（套餐/订阅状态为 AWS 实时数据）→ 申请新账号（自动推荐用户名、提交即校验占用）
+
+| 我的账号 | 申请账号 |
+|---|---|
+| ![用户 Dashboard](docs/screenshots/02-user-dashboard.png) | ![申请弹窗](docs/screenshots/03-apply-modal.png) |
+
+**管理端 · 账号总览**：指标卡 + Top 用户 Credits + Tier 分布 + 按人聚合表（可展开下钻子账号）
+
+![账号总览](docs/screenshots/05-admin-accounts.png)
+
+**管理端 · 成本治理**：Overages 超额上限应用内调高（单向性警告 + 2 倍护栏 + 敞口预览）
+
+![调高超额上限](docs/screenshots/07-overage-modal.png)
+
+**管理端 · 审批 / 分组 / 存量导入**
+
+| 申请审批 | 存量导入（归属建议） |
+|---|---|
+| ![申请审批](docs/screenshots/04-admin-requests.png) | ![存量导入](docs/screenshots/09-admin-import.png) |
 
 ## 已实现模块
 

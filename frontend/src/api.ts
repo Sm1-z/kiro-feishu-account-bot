@@ -122,4 +122,25 @@ export const raiseOverageCap = (desired_value: number) =>
 export const createGroup = (group_name: string) =>
   api.post('/api/admin/groups', { group_name })
 
+export interface UnlinkedAccount {
+  kiro_user_id: string
+  kiro_username: string
+  kiro_email: string
+  display_name: string
+  suggested_open_id: string
+  suggested_name: string
+  confidence: '' | 'email' | 'pinyin'
+}
+export interface FeishuUser {
+  open_id: string
+  name: string
+  email: string
+}
+export const getUnlinked = () =>
+  api.get<UnlinkedAccount[]>('/api/admin/unlinked').then((r) => r.data)
+export const getFeishuUsers = () =>
+  api.get<FeishuUser[]>('/api/admin/feishu-users').then((r) => r.data)
+export const linkUnlinked = (kiro_user_id: string, feishu_open_id: string, feishu_name: string) =>
+  api.post('/api/admin/unlinked/link', { kiro_user_id, feishu_open_id, feishu_name })
+
 export default api

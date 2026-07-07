@@ -5,11 +5,12 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Space, Segmented, message, Popconfirm,
-  Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert, Input,
+  Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert, Input, Select,
 } from 'antd'
 import {
   adminRequests, approve, reject, getAccounts, getOverageCap, raiseOverageCap,
-  getGroups, createGroup, ReqItem, AccountRow, OverageCapInfo,
+  getGroups, createGroup, getUnlinked, getFeishuUsers, linkUnlinked,
+  ReqItem, AccountRow, OverageCapInfo, UnlinkedAccount, FeishuUser,
 } from '../api'
 import { HBarChart, DonutChart } from '../components/MiniCharts'
 
@@ -402,6 +403,100 @@ function GroupsPanel() {
   )
 }
 
+function ImportPanel() {
+  const [rows, setRows] = useState<UnlinkedAccount[]>([])
+  const [users, setUsers] = useState<FeishuUser[]>([])
+  const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  // 每行手工选择的绑定目标 open_id（覆盖建议）
+  const [picks, setPicks] = useState<Record<string, string>>({})
+  const [linking, setLinking] = useState<string>('')
+
+  // IDC 全量扫描有秒级耗时，不自动加载——管理员点「扫描」触发
+  const scan = async () => {
+    setLoading(true)
+    try {
+      const [u, f] = await Promise.all([getUnlinked(), getFeishuUsers()])
+      setRows(u); setUsers(f); setLoaded(true)
+    } catch { message.error('扫描失败') } finally { setLoading(false) }
+  }
+
+  const doLink = async (r: UnlinkedAccount) => {
+    const openId = picks[r.kiro_user_id] || r.suggested_open_id
+    if (!openId) return
+    const name = users.find((u) => u.open_id === openId)?.name || r.suggested_name
+    setLinking(r.kiro_user_id)
+    try {
+      await linkUnlinked(r.kiro_user_id, openId, name)
+      message.success(`${r.kiro_username} 已绑定给 ${name}`)
+      setRows((prev) => prev.filter((x) => x.kiro_user_id !== r.kiro_user_id))
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '绑定失败')
+    } finally { setLinking('') }
+  }
+
+  const confTag = (c: string) =>
+    c === 'email' ? <Tag color="green">邮箱匹配</Tag>
+    : c === 'pinyin' ? <Tag color="orange">拼音匹配</Tag>
+    : <Tag>无建议</Tag>
+
+  const cols = [
+    { title: 'IDC 用户名', dataIndex: 'kiro_username' },
+    { title: '显示名', dataIndex: 'display_name' },
+    { title: '邮箱', dataIndex: 'kiro_email' },
+    { title: '建议归属', render: (_: any, r: UnlinkedAccount) => (
+      <Space size={4}>
+        {confTag(r.confidence)}
+        {r.suggested_name && <span>{r.suggested_name}</span>}
+      </Space>
+    ) },
+    { title: '绑定给', render: (_: any, r: UnlinkedAccount) => (
+      <Select
+        style={{ width: 180 }}
+        placeholder="选择飞书用户"
+        showSearch
+        optionFilterProp="label"
+        value={picks[r.kiro_user_id] || r.suggested_open_id || undefined}
+        onChange={(v) => setPicks((p) => ({ ...p, [r.kiro_user_id]: v }))}
+        options={users.map((u) => ({ value: u.open_id, label: u.name }))}
+      />
+    ) },
+    { title: '操作', render: (_: any, r: UnlinkedAccount) => {
+      const target = picks[r.kiro_user_id] || r.suggested_open_id
+      const name = users.find((u) => u.open_id === target)?.name || r.suggested_name
+      return (
+        <Popconfirm title={`确认把 ${r.kiro_username} 绑定给 ${name || '?'}？`}
+          onConfirm={() => doLink(r)} disabled={!target}>
+          <Button size="small" type="primary" disabled={!target}
+            loading={linking === r.kiro_user_id}>
+            绑定
+          </Button>
+        </Popconfirm>
+      )
+    } },
+  ]
+
+  return (
+    <Card title="存量账号导入"
+      extra={<Button type="primary" loading={loading} onClick={scan}>
+        {loaded ? '重新扫描' : '扫描游离账号'}
+      </Button>}>
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+        游离账号 = IDC 里存在但未绑定飞书用户的账号（非本平台开通的存量）。
+        绑定后账号会出现在对方的「我的 Kiro 账号」，套餐/状态/用量自动按实况显示。
+        建议归属：<Tag color="green">邮箱匹配</Tag>可信度高；<Tag color="orange">拼音匹配</Tag>请人工核对后再绑定。
+        绑定目标下拉仅含在平台登录/申请过的飞书用户。
+      </Typography.Paragraph>
+      {!loaded && !loading && <Alert type="info" showIcon message="点右上角「扫描游离账号」开始（全量扫 IDC，数秒）" />}
+      {loaded && (
+        <Table rowKey="kiro_user_id" dataSource={rows} columns={cols}
+          loading={loading} size="small" pagination={{ pageSize: 15 }}
+          locale={{ emptyText: '没有游离账号，全部已关联 ✅' }} />
+      )}
+    </Card>
+  )
+}
+
 export default function AdminPage() {
   const nav = useNavigate()
   return (
@@ -419,6 +514,7 @@ export default function AdminPage() {
             { key: 'requests', label: '申请审批', children: <RequestsPanel /> },
             { key: 'accounts', label: '账号总览', children: <AccountsPanel /> },
             { key: 'groups', label: '分组管理', children: <GroupsPanel /> },
+            { key: 'import', label: '存量导入', children: <ImportPanel /> },
           ]}
         />
       </Content>

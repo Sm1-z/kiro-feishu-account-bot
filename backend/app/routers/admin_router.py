@@ -16,7 +16,7 @@ from app.auth import CurrentUser, require_admin
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import RequestStore
-from app.schemas import GroupIn, ManualLinkIn, OverageCapIn, ReviewIn
+from app.schemas import GroupIn, ImportLinkIn, ManualLinkIn, OverageCapIn, ReviewIn
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -183,6 +183,57 @@ def create_group(body: GroupIn, _: CurrentUser = Depends(require_admin)):
             raise HTTPException(400, f"分组 '{name}' 已存在")
         raise HTTPException(500, f"创建分组失败: {exc.response['Error']['Message']}")
     return {"group_id": resp["GroupId"], "group_name": name}
+
+
+def _known_feishu_users() -> list[dict]:
+    """平台已知的飞书用户 = 映射表 + 申请记录去重（open_id → name）。
+
+    平台不落库飞书邮箱（OAuth 拿到但只进 JWT），故 email 建议匹配仅在
+    映射表 kiro_email 命中时生效；拼音建议靠 name。
+    """
+    users: dict[str, dict] = {}
+    for m in MappingStore().list_all():
+        if m.feishu_open_id and m.feishu_open_id not in users:
+            users[m.feishu_open_id] = {
+                "open_id": m.feishu_open_id, "name": m.feishu_name,
+                "email": m.kiro_email,
+            }
+    for r in RequestStore().list_by_status():
+        if r.user_open_id and r.user_open_id not in users:
+            users[r.user_open_id] = {
+                "open_id": r.user_open_id, "name": r.user_name, "email": "",
+            }
+    return list(users.values())
+
+
+@router.get("/unlinked")
+def list_unlinked(_: CurrentUser = Depends(require_admin)):
+    """存量导入①：IDC 游离账号（未在映射表中）+ 归属建议。管理员点按钮触发。"""
+    from app.resolver import ImportService
+
+    return ImportService().list_unlinked(known_users=_known_feishu_users())
+
+
+@router.get("/feishu-users")
+def feishu_users(_: CurrentUser = Depends(require_admin)):
+    """存量导入②：可选绑定目标（平台已知的飞书用户），手工绑定下拉用。"""
+    return _known_feishu_users()
+
+
+@router.post("/unlinked/link")
+def link_unlinked(body: ImportLinkIn, _: CurrentUser = Depends(require_admin)):
+    """存量导入③：确认绑定。用户名/邮箱从 IDC 自动补全，主/副自动判定。"""
+    from app.resolver import ImportService
+
+    try:
+        m = ImportService().link(
+            kiro_user_id=body.kiro_user_id,
+            feishu_open_id=body.feishu_open_id,
+            feishu_name=body.feishu_name,
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"绑定失败: {exc}")
+    return m.__dict__
 
 
 @router.post("/link")

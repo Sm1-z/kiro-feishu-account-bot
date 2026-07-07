@@ -98,3 +98,77 @@ def test_resolver_has_no_idc_calls(store):
     # Resolver 实例不应有 _idc / session 属性（那是 MigrationResolver 的）
     assert not hasattr(r, "_idc")
     assert not hasattr(r, "_session")
+
+
+# ---- username_base（存量导入归属建议）----
+
+def test_username_base_strips_suffixes():
+    assert R.username_base("zhangsan") == "zhangsan"
+    assert R.username_base("zhangsan2") == "zhangsan"
+    assert R.username_base("zhangsan-new") == "zhangsan"
+    assert R.username_base("zhangsan-new3") == "zhangsan"
+    assert R.username_base("") == ""
+
+
+# ---- ImportService（发现游离账号 + 归属建议 + 绑定）----
+
+def _make_import_service(store, idc_users):
+    """构造 ImportService：mock IDC 分页返回 idc_users。"""
+    from unittest.mock import MagicMock, patch
+
+    svc = R.ImportService.__new__(R.ImportService)
+    svc.store = store
+    svc.resolver = R.Resolver(store)
+    svc._id_store = "d-1"
+    idc = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Users": idc_users}]
+    idc.get_paginator.return_value = paginator
+    svc._idc = idc
+    return svc, idc
+
+
+def test_list_unlinked_diffs_and_suggests(store):
+    # 映射表已有 uid-linked；IDC 有 3 个用户
+    store.put(AccountMapping(kiro_user_id="uid-linked", feishu_open_id="ou_a",
+                             feishu_name="张三", kiro_username="zhangsan"))
+    idc_users = [
+        {"UserId": "uid-linked", "UserName": "zhangsan",
+         "Emails": [{"Value": "z@x.com", "Primary": True}]},
+        {"UserId": "uid-2", "UserName": "lisi-new2", "DisplayName": "李四",
+         "Emails": [{"Value": "lisi@x.com", "Primary": True}]},
+        {"UserId": "uid-3", "UserName": "wangwu", "DisplayName": "王五",
+         "Emails": [{"Value": "ww@x.com", "Primary": True}]},
+    ]
+    svc, _ = _make_import_service(store, idc_users)
+    known = [
+        {"open_id": "ou_b", "name": "李四", "email": ""},          # 拼音命中 lisi-new2
+        {"open_id": "ou_c", "name": "赵六", "email": "ww@x.com"},  # 邮箱命中 wangwu
+    ]
+    out = svc.list_unlinked(known_users=known)
+    # 已关联的 uid-linked 被 diff 掉
+    ids = [r["kiro_user_id"] for r in out]
+    assert "uid-linked" not in ids and set(ids) == {"uid-2", "uid-3"}
+    by_id = {r["kiro_user_id"]: r for r in out}
+    # 邮箱匹配优先且高可信
+    assert by_id["uid-3"]["confidence"] == "email"
+    assert by_id["uid-3"]["suggested_open_id"] == "ou_c"
+    # 拼音基名匹配（lisi-new2 → lisi → 李四）
+    assert by_id["uid-2"]["confidence"] == "pinyin"
+    assert by_id["uid-2"]["suggested_open_id"] == "ou_b"
+
+
+def test_import_link_writes_mapping_with_idc_details(store):
+    svc, idc = _make_import_service(store, [])
+    idc.describe_user.return_value = {
+        "UserName": "lisi-new2",
+        "Emails": [{"Value": "lisi@x.com", "Primary": True}],
+    }
+    m = svc.link("uid-2", "ou_b", "李四")
+    assert m.kiro_username == "lisi-new2"
+    assert m.kiro_email == "lisi@x.com"
+    assert m.account_role == PRIMARY  # 首个账号自动主
+    # 落库可反查
+    got = store.list_by_feishu("ou_b")
+    assert len(got) == 1 and got[0].kiro_user_id == "uid-2"
+    assert got[0].status == "active"

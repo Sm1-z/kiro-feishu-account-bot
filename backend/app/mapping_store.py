@@ -139,6 +139,17 @@ class MappingStore:
         )
         return [AccountMapping.from_item(i) for i in resp.get("Items", [])]
 
+    def list_all(self) -> list[AccountMapping]:
+        """全量映射（管理端账号总览 / 存量导入 diff 用）。"""
+        items, kwargs = [], {}
+        while True:
+            resp = self._table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+        return [AccountMapping.from_item(i) for i in items]
+
     def all_usernames(self) -> set[str]:
         """已被本系统占用的全部 kiro_username（申请校验用，避免撞名）。"""
         usernames: set[str] = set()

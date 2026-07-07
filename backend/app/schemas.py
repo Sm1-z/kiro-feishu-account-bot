@@ -37,6 +37,12 @@ class GroupIn(BaseModel):
     group_name: str = Field(min_length=1, max_length=128)
 
 
+class ImportLinkIn(BaseModel):
+    kiro_user_id: str = Field(min_length=1)
+    feishu_open_id: str = Field(min_length=1)
+    feishu_name: str = ""
+
+
 class ManualLinkIn(BaseModel):
     kiro_user_id: str
     feishu_open_id: str

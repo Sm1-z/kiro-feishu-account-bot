@@ -61,6 +61,14 @@ def link_candidates(feishu_name: str) -> list[str]:
     return out
 
 
+def username_base(username: str) -> str:
+    """账号用户名去掉 -newN / 数字后缀，还原拼音基名（存量导入归属建议用）。
+
+    zhangsan / zhangsan2 / zhangsan-new / zhangsan-new3 → zhangsan
+    """
+    return re.sub(r"(-new\d*|\d+)$", "", (username or "").strip().lower())
+
+
 def suggest_new_username(feishu_name: str, taken: set[str]) -> str:
     """申请新账号时推荐下一个可用 -new 用户名（仅建议默认值，猜错无害）。
 
@@ -131,6 +139,91 @@ class Resolver:
     def unlink(self, kiro_user_id: str) -> None:
         """解除关联：仅删本地映射，不动 IDC 账号。"""
         self.store.delete(kiro_user_id)
+
+
+# ---------------------------------------------------------------------------
+# 存量导入（管理员发起：发现 IDC 游离账号 → 建议归属 → 确认绑定）
+# ---------------------------------------------------------------------------
+
+class ImportService:
+    """管理员导入 IDC 存量账号（非平台开通的）。
+
+    流程（管理页「存量导入」）：
+    ① list_unlinked：全量扫 IDC，diff 掉映射表已有 → 游离账号列表
+    ② 归属建议：游离账号邮箱 == 某飞书用户邮箱（平台登录过的）→ 高可信；
+       用户名拼音基名 == 某飞书用户姓名拼音 → 低可信（须人工确认）
+    ③ 管理员确认 → 复用 Resolver.manual_link 写映射
+
+    只在管理员点按钮时触发（IDC 全量扫描不进热路径）。
+    """
+
+    def __init__(self, store: MappingStore | None = None):
+        self.store = store or MappingStore()
+        self.resolver = Resolver(self.store)
+        session = get_session()
+        self._id_store = get_identity_store_id(session)
+        self._idc = session.client("identitystore", region_name=settings.aws_region)
+
+    @staticmethod
+    def _primary_email(idc_user: dict) -> str:
+        emails = idc_user.get("Emails", []) or []
+        primary = next((e for e in emails if e.get("Primary")), None)
+        return (primary or (emails[0] if emails else {})).get("Value", "")
+
+    def list_unlinked(self, known_users: list[dict] | None = None) -> list[dict]:
+        """游离账号 = IDC 全量 - 映射表已有。附归属建议。
+
+        known_users: [{open_id, name, email}]（平台登录过的飞书用户），用于建议匹配。
+        """
+        linked_ids = {m.kiro_user_id for m in self.store.list_all()}
+        by_email, by_pinyin = {}, {}
+        for u in known_users or []:
+            if u.get("email"):
+                by_email[u["email"].lower()] = u
+            py = main_name_pinyin(u.get("name", ""))
+            if py:
+                by_pinyin.setdefault(py, u)
+
+        out = []
+        paginator = self._idc.get_paginator("list_users")
+        for page in paginator.paginate(IdentityStoreId=self._id_store):
+            for u in page.get("Users", []):
+                if u["UserId"] in linked_ids:
+                    continue
+                username = u.get("UserName", "")
+                email = self._primary_email(u)
+                display = u.get("DisplayName", "")
+                # 归属建议：email 精确（高可信）▶ 拼音基名（低可信）
+                suggestion, confidence = None, ""
+                hit = by_email.get(email.lower()) if email else None
+                if hit:
+                    suggestion, confidence = hit, "email"
+                else:
+                    hit = by_pinyin.get(username_base(username))
+                    if hit:
+                        suggestion, confidence = hit, "pinyin"
+                out.append({
+                    "kiro_user_id": u["UserId"],
+                    "kiro_username": username,
+                    "kiro_email": email,
+                    "display_name": display,
+                    "suggested_open_id": suggestion["open_id"] if suggestion else "",
+                    "suggested_name": suggestion["name"] if suggestion else "",
+                    "confidence": confidence,  # email / pinyin / ""
+                })
+        return sorted(out, key=lambda x: (x["confidence"] == "", x["kiro_username"]))
+
+    def link(self, kiro_user_id: str, feishu_open_id: str, feishu_name: str) -> AccountMapping:
+        """确认绑定：读 IDC 详情补全用户名/邮箱，写映射（主/副自动判定）。"""
+        u = self._idc.describe_user(IdentityStoreId=self._id_store, UserId=kiro_user_id)
+        return self.resolver.manual_link(
+            kiro_user_id=kiro_user_id,
+            feishu_open_id=feishu_open_id,
+            feishu_name=feishu_name,
+            kiro_username=u.get("UserName", ""),
+            kiro_email=self._primary_email(u),
+            status="active",
+        )
 
 
 # ---------------------------------------------------------------------------

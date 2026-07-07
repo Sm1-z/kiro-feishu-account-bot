@@ -59,7 +59,7 @@ backend/app/
 ├── feishu_ws.py     WS 长连接（免公网，先 ACK 后异步）
 ├── auth.py          JWT + 认证依赖
 ├── schemas.py       API 请求模型
-├── routers/         auth / request / admin 路由（16 API）
+├── routers/         auth / request / admin 路由（21 API）
 └── main.py          FastAPI 入口（启动 WS + 托管前端）
 frontend/            React + TS + AntD（登录/Dashboard/审批面板）
 infra/

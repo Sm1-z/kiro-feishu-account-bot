@@ -37,9 +37,11 @@ export interface Account {
   live_tier: string | null
 }
 
-// 有效状态：实况优先（控制台退订不回写映射表，快照会滞后）
+// 有效状态：实况优先（控制台退订不回写映射表，快照会滞后）；CANCELLED 不算有效
 export const isAccountActive = (a: Account) =>
-  a.live_synced ? a.live_status != null : a.status === 'active'
+  a.live_synced
+    ? a.live_status != null && a.live_status !== 'CANCELLED'
+    : a.status === 'active'
 
 export interface Me {
   open_id: string

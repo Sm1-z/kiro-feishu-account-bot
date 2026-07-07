@@ -49,8 +49,8 @@ export default function Dashboard() {
   // 分组从 IDC 动态拉取（失败时后端已降级为默认组）
   useEffect(() => { getGroups().then(setGroups).catch(() => setGroups([])) }, [])
 
+  // 账号数量不设上限（与后端 apply 一致），仅展示有效账号数
   const activeCount = me ? me.accounts.filter(isAccountActive).length : 0
-  const quotaFull = me ? activeCount >= me.quota : false
 
   const submitApply = async () => {
     const v = await form.validateFields()
@@ -125,15 +125,15 @@ export default function Dashboard() {
       </Header>
       <Content style={{ padding: 24 }}>
         <Card
-          title={`我的 Kiro 账号（${activeCount} / ${me?.quota || 0}）`}
+          title={`我的 Kiro 账号（${activeCount} 个有效）`}
           extra={
             <Space>
               <Button loading={refreshing} onClick={load}>刷新</Button>
-              <Button type="primary" disabled={quotaFull} onClick={() => {
+              <Button type="primary" onClick={() => {
                 form.setFieldsValue({ username: me?.suggested_username })
                 setApplyOpen(true)
               }}>
-                {quotaFull ? '配额已满' : '申请账号'}
+                申请账号
               </Button>
             </Space>
           }

@@ -58,6 +58,7 @@ export interface ReqItem {
   status: string
   payload: any
   result: any
+  review_comment?: string
   created_at: number
 }
 

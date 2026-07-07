@@ -25,6 +25,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 
 
+def _username_exists_in_idc(username: str) -> bool:
+    """实查 IDC 用户名是否已存在。查询失败保守放行（审批执行时仍有 Conflict 兜底）。"""
+    from app.aws import get_identity_store_id, get_session
+    try:
+        session = get_session()
+        id_store = get_identity_store_id(session)
+        idc = session.client("identitystore", region_name=settings.aws_region)
+        try:
+            idc.get_user_id(
+                IdentityStoreId=id_store,
+                AlternateIdentifier={"UniqueAttribute": {
+                    "AttributePath": "userName", "AttributeValue": username}},
+            )
+            return True
+        except idc.exceptions.ResourceNotFoundException:
+            return False
+    except Exception:
+        logger.exception("IDC 用户名占用检查失败，放行由执行步兜底")
+        return False
+
+
 def _push_approval_cards(req: Request) -> list[str]:
     """给所有管理员推审批卡片，返回 message_id 列表。飞书失败不阻断申请落库。"""
     mids: list[str] = []
@@ -44,9 +65,13 @@ def apply(body: ApplyIn, user: CurrentUser = Depends(current_user)):
 
     # 账号数量不设上限（不限制每人可申请的 Kiro 账号数）
 
-    # 用户名占用
+    # 用户名占用：先查映射表（平台开的账号），再实查 IDC——IDC 里可能有
+    # 非平台创建的存量用户（如 SRE 手工建的），只查映射表拦不住，
+    # 会到审批执行时才撞 Conflict，用户只看到 failed 不知道原因。
     if body.username in store.all_usernames():
         raise HTTPException(400, f"用户名 '{body.username}' 已被占用")
+    if _username_exists_in_idc(body.username):
+        raise HTTPException(400, f"用户名 '{body.username}' 在 IDC 中已存在，请更换用户名")
     # 邮箱唯一（IDC 约束本地拦截）
     if store.find_by_email(body.email):
         raise HTTPException(400, f"邮箱 '{body.email}' 已被使用")

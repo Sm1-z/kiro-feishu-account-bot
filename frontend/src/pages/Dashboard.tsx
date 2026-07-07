@@ -104,6 +104,13 @@ export default function Dashboard() {
       const c = { pending: 'orange', approved: 'blue', executed: 'green', failed: 'red', rejected: 'default' } as any
       return <Tag color={c[s]}>{s}</Tag>
     } },
+    { title: '失败/拒绝原因', render: (_: any, r: ReqItem) => {
+      // failed 的原因在 result.error（执行报错）；rejected 的在 review_comment（审批人填写）
+      const reason = r.result?.error || r.review_comment
+      return reason
+        ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{reason}</Typography.Text>
+        : <span style={{ color: '#ccc' }}>—</span>
+    } },
   ]
 
   return (

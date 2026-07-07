@@ -33,6 +33,10 @@ class OverageCapIn(BaseModel):
     desired_value: float = Field(gt=0)
 
 
+class GroupIn(BaseModel):
+    group_name: str = Field(min_length=1, max_length=128)
+
+
 class ManualLinkIn(BaseModel):
     kiro_user_id: str
     feishu_open_id: str

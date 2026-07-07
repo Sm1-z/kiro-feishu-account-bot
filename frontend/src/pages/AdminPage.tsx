@@ -5,11 +5,11 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Space, Segmented, message, Popconfirm,
-  Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert,
+  Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert, Input,
 } from 'antd'
 import {
   adminRequests, approve, reject, getAccounts, getOverageCap, raiseOverageCap,
-  ReqItem, AccountRow, OverageCapInfo,
+  getGroups, createGroup, ReqItem, AccountRow, OverageCapInfo,
 } from '../api'
 import { HBarChart, DonutChart } from '../components/MiniCharts'
 
@@ -345,6 +345,63 @@ function AccountsPanel() {
   )
 }
 
+function GroupsPanel() {
+  const [groups, setGroups] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [creating, setCreating] = useState(false)
+
+  const load = async () => {
+    setLoading(true)
+    try { setGroups(await getGroups()) }
+    catch { message.error('加载失败') } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  const doCreate = async () => {
+    const name = newName.trim()
+    if (!name) return
+    setCreating(true)
+    try {
+      await createGroup(name)
+      message.success(`分组 ${name} 已创建`)
+      setNewName('')
+      load()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '创建失败')
+    } finally { setCreating(false) }
+  }
+
+  return (
+    <Card title="分组管理" extra={<Button size="small" onClick={load}>刷新</Button>}>
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+        分组即 IAM Identity Center 的 Group（申请表单的分组下拉从这里拉取）。
+        新建后用户申请账号时即可选择；开通时账号会加入该组。
+      </Typography.Paragraph>
+      <Space style={{ marginBottom: 16 }}>
+        <Input
+          placeholder="新分组名，如 Team-Backend"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onPressEnter={doCreate}
+          style={{ width: 280 }}
+        />
+        <Button type="primary" loading={creating} disabled={!newName.trim()} onClick={doCreate}>
+          新建分组
+        </Button>
+      </Space>
+      <Table
+        rowKey={(g) => g}
+        dataSource={groups}
+        columns={[{ title: '分组名', render: (g: string) => g }]}
+        loading={loading}
+        size="small"
+        pagination={{ pageSize: 15 }}
+      />
+    </Card>
+  )
+}
+
 export default function AdminPage() {
   const nav = useNavigate()
   return (
@@ -361,6 +418,7 @@ export default function AdminPage() {
           items={[
             { key: 'requests', label: '申请审批', children: <RequestsPanel /> },
             { key: 'accounts', label: '账号总览', children: <AccountsPanel /> },
+            { key: 'groups', label: '分组管理', children: <GroupsPanel /> },
           ]}
         />
       </Content>

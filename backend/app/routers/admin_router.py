@@ -13,9 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.approval import ApprovalService
 from app.auth import CurrentUser, require_admin
+from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import RequestStore
-from app.schemas import ManualLinkIn, OverageCapIn, ReviewIn
+from app.schemas import GroupIn, ManualLinkIn, OverageCapIn, ReviewIn
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -162,6 +163,26 @@ def raise_overage_cap(body: OverageCapIn, admin: CurrentUser = Depends(require_a
         result={"status": result["status"], "request_id": result["request_id"]},
     ))
     return result
+
+
+@router.post("/groups")
+def create_group(body: GroupIn, _: CurrentUser = Depends(require_admin)):
+    """新建分组 = 在 IAM Identity Center 建 Group（申请表单的分组下拉即 IDC 组）。"""
+    from botocore.exceptions import ClientError
+
+    from app.aws import get_identity_store_id, get_session
+
+    name = body.group_name.strip()
+    session = get_session()
+    id_store = get_identity_store_id(session)
+    idc = session.client("identitystore", region_name=settings.aws_region)
+    try:
+        resp = idc.create_group(IdentityStoreId=id_store, DisplayName=name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConflictException":
+            raise HTTPException(400, f"分组 '{name}' 已存在")
+        raise HTTPException(500, f"创建分组失败: {exc.response['Error']['Message']}")
+    return {"group_id": resp["GroupId"], "group_name": name}
 
 
 @router.post("/link")

@@ -119,5 +119,7 @@ export const getOverageCap = () =>
   api.get<OverageCapInfo>('/api/admin/overage-cap').then((r) => r.data)
 export const raiseOverageCap = (desired_value: number) =>
   api.post('/api/admin/overage-cap', { desired_value })
+export const createGroup = (group_name: string) =>
+  api.post('/api/admin/groups', { group_name })
 
 export default api

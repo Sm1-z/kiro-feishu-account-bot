@@ -130,14 +130,20 @@ DEMO_BILLING = {
     "u-004": _bill("KIRO_ENTERPRISE_POWER", 200.0, 10000.0, 10120.0, overage=4.8),
     "u-005": _bill("KIRO_ENTERPRISE_PRO", 0.0, 1000.0, 0.0),
 }
-def _demo_month_usage(uid, year, month):
-    b = DEMO_BILLING.get(uid)
-    if not b or month % 2 == 0:  # 偶数月演示「无记录」
-        return {"user_id": uid, "year": year, "month": month, "credit_used": None, "credit_limit": None,
-                "credit_unit": None, "overage_charges": None, "overage_rate": None, "has_usage_entry": False}
-    return {"user_id": uid, "year": year, "month": month, "credit_used": b["credit_used"] * 0.8,
-            "credit_limit": b["credit_limit"], "credit_unit": "INVOCATIONS",
-            "overage_charges": b["overage_charges"], "overage_rate": 0.04, "has_usage_entry": True}
+# 本月已用 / 超额 credits（User Activity Report 本月聚合，活动口径）；王五超限 10120/10000、超额 120 credits → 预估 $4.80
+DEMO_MONTH_USAGE = {
+    "u-001": {"credits": 862.5, "overage": 0.0, "messages": 4210, "active_days": 3, "last_active": "2026-07-06"},
+    "u-002": {"credits": 35.3, "overage": 0.0, "messages": 102, "active_days": 2, "last_active": "2026-06-28"},
+    "u-003": {"credits": 1740.8, "overage": 0.0, "messages": 2874, "active_days": 5, "last_active": "2026-07-07"},
+    "u-004": {"credits": 10120.0, "overage": 120.0, "messages": 6031, "active_days": 6, "last_active": "2026-07-07"},
+    "u-005": {"credits": 0.0, "overage": 0.0, "messages": 0, "active_days": 0, "last_active": ""},
+}
+
+
+def _demo_month_usage_by_user(year, month, force=False):
+    if month % 2 == 0:  # 偶数月演示「无记录」
+        return {}
+    return {u: {**v, "credits": round(v["credits"] * 0.8, 1)} for u, v in DEMO_MONTH_USAGE.items()}
 
 import app.usage as usage_mod
 import app.quotas as quotas_mod
@@ -150,7 +156,9 @@ patches = [
     patch.object(quotas_mod, "get_pending_cap_request", lambda: None),
     patch.object(prov_mod, "live_subscription_map", lambda force=False: DEMO_LIVE),
     patch.object(billing_mod, "get_billing_by_user", lambda ids, force=False: {u: DEMO_BILLING[u] for u in ids if u in DEMO_BILLING}),
-    patch.object(billing_mod, "get_user_month_usage", _demo_month_usage),
+    patch.object(usage_mod, "_enabled", lambda: True),
+    patch.object(usage_mod, "get_current_month_usage_by_user", lambda force=False: DEMO_MONTH_USAGE),
+    patch.object(usage_mod, "get_month_usage_by_user", _demo_month_usage_by_user),
 ]
 for p in patches:
     p.start()

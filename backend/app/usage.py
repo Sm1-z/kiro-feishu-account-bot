@@ -117,6 +117,82 @@ def get_usage_by_user(force: bool = False) -> dict:
         return _cache["data"] or {}
 
 
+# ---------------------------------------------------------------------------
+# 按自然月聚合（额度用量分子 / 账单回溯）
+# ---------------------------------------------------------------------------
+# 为什么不用订阅计费服务的 currentUsage：Kiro Enterprise 用户的用量在计费服务里按订阅 ARN 聚合，
+# 其按用户查询接口读的是个人版的键，对企业用户恒为 0（2026-11 实测 + 源码确认）。
+# User Activity Report（本表）是企业侧按用户 credits 的权威来源，与 Kiro 控制台 Dashboard 一致，日级延迟约 1 天。
+_month_cache: dict = {}  # {"YYYY-MM": {"ts": float, "data": dict}}
+
+
+def month_key(year: int, month: int) -> str:
+    if not 1 <= month <= 12:
+        raise ValueError("month must be 1-12")
+    return f"{year:04d}-{month:02d}"
+
+
+def _query_usage_by_user_for_month(ym: str) -> dict:
+    """某自然月按 userid 聚合。date 列为 'YYYY-MM-DD' 字符串，按前缀匹配该月。"""
+    table = _resolve_table()
+    # ym 由 month_key 生成（纯数字与连字符），非用户输入；Athena 不支持表名参数化
+    select = (
+        "SELECT userid, "
+        "SUM(TRY_CAST(credits_used AS DOUBLE)) AS credits, "
+        "SUM(TRY_CAST(overage_credits_used AS DOUBLE)) AS overage, "
+        "SUM(TRY_CAST(total_messages AS INTEGER)) AS messages, "
+        "COUNT(DISTINCT date) AS active_days, "
+        "MAX(date) AS last_active "
+    )
+    query = select + f"FROM {table} WHERE substr(date, 1, 7) = '{ym}' GROUP BY userid"  # nosec B608
+    out: dict = {}
+    for row in _run_query(query):
+        uid = (row[0] or "").strip().strip('"').strip("'")  # 报表里 userid 带双引号
+        if not uid:
+            continue
+        out[uid] = {
+            "credits": _to_float(row[1]),
+            "overage": _to_float(row[2]),
+            "messages": _to_int(row[3]),
+            "active_days": _to_int(row[4]),
+            "last_active": row[5] or "",
+        }
+    return out
+
+
+def get_month_usage_by_user(year: int, month: int, force: bool = False) -> dict:
+    """{userid: {credits, overage, messages, active_days, last_active}}，按月 TTL 缓存；未配置/失败返回 {}。"""
+    if not _enabled():
+        return {}
+    ym = month_key(year, month)
+    now = time.time()
+    with _lock:
+        ent = _month_cache.get(ym)
+        if ent and not force and (now - ent["ts"]) < _CACHE_TTL and ent["data"]:
+            return ent["data"]
+    try:
+        data = _query_usage_by_user_for_month(ym)
+        with _lock:
+            _month_cache[ym] = {"ts": time.time(), "data": data}
+        return data
+    except Exception:
+        logger.exception("拉取 %s 月 Kiro 用量失败，降级为空", ym)
+        with _lock:
+            ent = _month_cache.get(ym)
+        return (ent or {}).get("data") or {}
+
+
+def current_month() -> tuple[int, int]:
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return now.year, now.month
+
+
+def get_current_month_usage_by_user(force: bool = False) -> dict:
+    y, m = current_month()
+    return get_month_usage_by_user(y, m, force=force)
+
+
 def _to_int(v, default=0):
     try:
         return int(float(v)) if v not in (None, "", "None") else default

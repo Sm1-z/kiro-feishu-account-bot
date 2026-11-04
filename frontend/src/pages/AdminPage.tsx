@@ -79,20 +79,29 @@ function BillingHistoryModal({ row, onClose }: { row: AccountRow | null; onClose
           <Button size="small" loading={loading} onClick={() => query(year, month)}>查询</Button>
         </Space>
         {err && <Alert type="error" showIcon message={err} />}
-        {data && !data.has_usage_entry && (
-          <Alert type="info" showIcon message={`${year} 年 ${month} 月无该账号的计费记录`}
-            description="该月没有生效的订阅，或计费服务尚未沉淀该月数据。" />
+        {data && !data.available && (
+          <Alert type="warning" showIcon message="用量报表未配置或暂不可用"
+            description="账单回溯依赖 Kiro Console 的 User Activity Report（Athena）。请确认已开启报表并配置 Athena。" />
+        )}
+        {data && data.available && !data.has_usage_entry && (
+          <Alert type="info" showIcon message={`${year} 年 ${month} 月无该账号的用量记录`}
+            description="该月没有任何活动，或报表尚未沉淀该月数据（日级延迟约 1 天）。" />
         )}
         {data && data.has_usage_entry && (
           <Row gutter={12}>
-            <Col span={8}><Card size="small"><Statistic title="月额度" value={data.credit_limit ?? '—'} /></Card></Col>
-            <Col span={8}><Card size="small"><Statistic title="已用" value={data.credit_used ?? '—'} precision={1} /></Card></Col>
-            <Col span={8}><Card size="small"><Statistic title="超额费用" prefix="$" value={data.overage_charges ?? '—'} precision={2} /></Card></Col>
+            <Col span={6}><Card size="small"><Statistic title="已用 credits" value={data.credit_used ?? '—'} precision={1} /></Card></Col>
+            <Col span={6}><Card size="small"><Statistic title="超额 credits" value={data.overage_credits ?? '—'} precision={1}
+              valueStyle={data.overage_credits ? { color: '#cf1322' } : undefined} /></Card></Col>
+            <Col span={6}><Card size="small"><Statistic title="预估超额费用" prefix="$" value={data.overage_charges_est ?? '—'} precision={2} /></Card></Col>
+            <Col span={6}><Card size="small"><Statistic title="活跃天数" value={data.active_days ?? '—'} suffix="天" />
+              {data.messages != null && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{data.messages.toLocaleString()} 条消息</Typography.Text>}
+            </Card></Col>
           </Row>
         )}
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          数据直读 Kiro 订阅计费服务（计费口径，按 UTC 自然月）；超额单价 {data?.overage_rate != null ? `$${data.overage_rate}/credit` : '—'}。
-          Athena 用量报表为活动口径，两者可能存在时效差。
+          用量来自 Kiro Console 的 User Activity Report（活动口径，按 UTC 自然月，日级延迟约 1 天），与 Kiro 控制台 Dashboard 一致；
+          预估超额费用 = 超额 credits × 单价 {data?.overage_rate != null ? `$${data.overage_rate}/credit` : '—'}
+          {data?.credit_limit != null ? `；当前套餐月额度 ${data.credit_limit.toLocaleString()}（${planLabel(data.plan_code)}）` : ''}。
         </Typography.Text>
       </Space>
     </Modal>
@@ -589,17 +598,25 @@ function AccountsPanel() {
           {r.billing_account_status && r.billing_account_status !== 'ACTIVE' && <Tag color="red" style={{ marginLeft: 4, fontSize: 11 }}>{r.billing_account_status}</Tag>}
         </span>
       ) },
-    { title: '额度用量', key: 'billing_credit', align: 'right' as const,
+    { title: <span title="本月已用 credits 来自 User Activity Report（活动口径，日级延迟约 1 天）；额度来自订阅计费服务">本月已用 / 额度</span>,
+      key: 'billing_credit', align: 'right' as const,
       render: (_: any, r: AccountRow) => {
         if (r.billing_credit_limit == null) return <span style={{ color: '#ccc' }}>—</span>
-        const used = r.billing_credit_used ?? 0
+        if (r.billing_credit_used == null) {
+          return <span style={{ color: '#ccc' }} title="用量报表不可用">— / {r.billing_credit_limit.toLocaleString()}</span>
+        }
+        const used = r.billing_credit_used
         const pct = r.billing_credit_limit > 0 ? used / r.billing_credit_limit : 0
         const color = pct >= 1 ? '#cf1322' : pct >= 0.8 ? '#d46b08' : undefined
-        return <span style={{ color }}>{used.toLocaleString()} / {r.billing_credit_limit.toLocaleString()}</span>
+        return <span style={{ color }}>{used.toLocaleString(undefined, { maximumFractionDigits: 1 })} / {r.billing_credit_limit.toLocaleString()}</span>
       } },
-    { title: '超额', dataIndex: 'billing_overage_charges', align: 'right' as const,
+    { title: <span title="预估 = 本月超额 credits × 超额单价（报表活动口径）">超额（预估）</span>,
+      dataIndex: 'billing_overage_charges', align: 'right' as const,
       render: (v: number | null, r: AccountRow) => (
-        <span style={{ color: v ? '#cf1322' : undefined }}>{fmtMoney(v, r.billing_currency)}</span>
+        <span style={{ color: v ? '#cf1322' : undefined }}
+          title={r.billing_overage_credits != null ? `超额 ${r.billing_overage_credits} credits × $${r.billing_overage_rate ?? 0.04}` : undefined}>
+          {fmtMoney(v, r.billing_currency)}
+        </span>
       ) },
     { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits },
     { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const, render: fmtNum },
@@ -781,7 +798,7 @@ function AccountsPanel() {
           一人多账号已合并为一行，Credits/消息为名下所有账号汇总；点行首 ▸ 展开看每个子账号。
           Tier/订阅状态为 AWS 实时数据（控制台的退订/改套餐也会反映）；
           用量来自 Kiro Analytics（Athena，约每日更新），点「刷新」强制重查。— 表示暂无数据。
-          「本月费用 / 额度用量 / 超额」直读 Kiro 订阅计费服务（计费口径，实时），Credits/消息数来自 Athena（活动口径），两者时效可能不同；点「账单」可按月回溯。
+          「本月费用」与月额度直读 Kiro 订阅计费服务（实时）；「本月已用 / 超额（预估）」与 Credits/消息数来自 User Activity Report（活动口径，日级延迟约 1 天）；点「账单」可按月回溯。
           子账号行的「停用」= 控制台 Deactivate Kiro plan（可选月底 / 立即），已停用（CANCELLED）的行显示「恢复」可撤销；「批量停用 / 回收」可一次处理多个低用量副账号。
         </Typography.Paragraph>
         {view === 'person' ? (

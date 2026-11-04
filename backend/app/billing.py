@@ -35,6 +35,7 @@ from app.provisioner import _signed_post
 logger = logging.getLogger(__name__)
 
 APP_CODE = "Kiro"
+DEFAULT_OVERAGE_RATE = 0.04  # USD/credit，计费服务未返回单价时的兜底（Kiro 公开定价）
 _TARGET = "AWSZornControlPlaneService."
 _CACHE_TTL = 60  # 秒
 _cache: dict = {"ts": 0.0, "data": {}}

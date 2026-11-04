@@ -253,39 +253,65 @@ BILLING_OK = {
 }
 
 
+MONTH_USAGE = {"u1": {"credits": 89.46, "overage": 25.0, "messages": 73, "active_days": 1, "last_active": "2026-11-03"}}
+
+
 def test_accounts_include_billing_fields(client):
     _seed_mapping("u1", "zhangsan", role="primary")
     _seed_mapping("u2", "zhangsan-2")
     with patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}) as gb, \
          patch("app.provisioner.live_subscription_map", return_value={}), \
-         patch("app.usage.get_usage_by_user", return_value={}):
+         patch("app.usage.get_usage_by_user", return_value={}), \
+         patch("app.usage.get_current_month_usage_by_user", return_value=MONTH_USAGE) as gm:
         r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
     assert r.status_code == 200
     rows = {x["kiro_user_id"]: x for x in r.json()}
     # 调用传入全部账号 id，且透传 force
     called_ids = gb.call_args.args[0]
     assert set(called_ids) == {"u1", "u2"} and gb.call_args.kwargs["force"] is False
+    assert gm.call_args.kwargs["force"] is False
     u1 = rows["u1"]
     assert u1["billing_synced"] is True
     assert u1["billing_plan_code"] == "KIRO_ENTERPRISE_POWER"
     assert u1["billing_current_charges"] == 200.0 and u1["billing_currency"] == "USD"
-    assert u1["billing_credit_used"] == 1234.5 and u1["billing_credit_limit"] == 10000.0
-    assert u1["billing_overage_charges"] == 3.2 and u1["billing_overage_rate"] == 0.04
+    assert u1["billing_credit_limit"] == 10000.0 and u1["billing_overage_rate"] == 0.04
+    # 本月已用 / 超额来自报表月聚合（活动口径），不是计费服务的 currentUsage
+    assert u1["billing_credit_used"] == 89.46 and u1["billing_credit_used_source"] == "athena_mtd"
+    assert u1["billing_overage_credits"] == 25.0
+    assert u1["billing_overage_charges"] == 1.0           # 25 × 0.04 预估
+    assert u1["billing_zorn_credit_used"] == 1234.5 and u1["billing_zorn_overage_charges"] == 3.2
     assert u1["billing_account_status"] == "ACTIVE"
-    # 没有计费数据的账号：synced=False、字段 None，列表不中断
+    # 报表可用但该用户本月无记录 → 0；没有计费数据 → synced=False、套餐字段 None，列表不中断
     u2 = rows["u2"]
     assert u2["billing_synced"] is False and u2["billing_error"] == "unavailable"
     assert u2["billing_current_charges"] is None and u2["billing_credit_limit"] is None
+    assert u2["billing_credit_used"] == 0.0 and u2["billing_overage_credits"] == 0.0
+    assert u2["billing_overage_charges"] == 0.0           # 无单价时用默认 0.04 × 0
+
+
+def test_accounts_month_usage_unavailable_gives_none(client):
+    """报表不可用（返回 {}）→ 本月已用/超额为 None 而不是 0，前端显示 —。"""
+    _seed_mapping("u1", "zhangsan")
+    with patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}), \
+         patch("app.provisioner.live_subscription_map", return_value={}), \
+         patch("app.usage.get_usage_by_user", return_value={}), \
+         patch("app.usage.get_current_month_usage_by_user", return_value={}):
+        r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
+    row = r.json()[0]
+    assert row["billing_credit_used"] is None and row["billing_credit_used_source"] is None
+    assert row["billing_overage_charges"] is None
+    assert row["billing_credit_limit"] == 10000.0   # 额度仍来自计费服务
 
 
 def test_accounts_force_passes_through_to_billing(client):
     _seed_mapping("u1", "zhangsan")
     with patch("app.billing.get_billing_by_user", return_value={}) as gb, \
          patch("app.provisioner.live_subscription_map", return_value={}), \
-         patch("app.usage.get_usage_by_user", return_value={}):
+         patch("app.usage.get_usage_by_user", return_value={}), \
+         patch("app.usage.get_current_month_usage_by_user", return_value={}) as gm:
         r = client.get("/api/admin/accounts?force=true", headers=_auth(ADMIN, "Admin"))
     assert r.status_code == 200
-    assert gb.call_args.kwargs["force"] is True
+    assert gb.call_args.kwargs["force"] is True and gm.call_args.kwargs["force"] is True
 
 
 def test_accounts_billing_total_failure_degrades(client):
@@ -300,23 +326,43 @@ def test_accounts_billing_total_failure_degrades(client):
     assert r.json()[0]["billing_current_charges"] is None
 
 
-def test_billing_history_endpoint(client):
-    hist = {"user_id": "u1", "year": 2026, "month": 10, "credit_used": 500.0,
-            "credit_limit": 10000.0, "credit_unit": "INVOCATIONS",
-            "overage_charges": 0.0, "overage_rate": 0.04, "has_usage_entry": True}
-    with patch("app.billing.get_user_month_usage", return_value=hist) as gm:
+def test_billing_history_endpoint_uses_athena_month(client):
+    month = {"u1": {"credits": 196.39, "overage": 50.0, "messages": 120, "active_days": 4, "last_active": "2026-10-08"}}
+    with patch("app.usage._enabled", return_value=True), \
+         patch("app.usage.get_month_usage_by_user", return_value=month) as gm, \
+         patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}):
         r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
                        headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200 and r.json()["credit_used"] == 500.0
-    gm.assert_called_once_with("u1", 2026, 10)
+    assert r.status_code == 200
+    body = r.json()
+    gm.assert_called_once_with(2026, 10)
+    assert body["source"] == "athena" and body["available"] is True and body["has_usage_entry"] is True
+    assert body["credit_used"] == 196.39 and body["overage_credits"] == 50.0
+    assert body["overage_charges_est"] == 2.0 and body["overage_rate"] == 0.04
+    assert body["messages"] == 120 and body["active_days"] == 4 and body["last_active"] == "2026-10-08"
+    assert body["credit_limit"] == 10000.0 and body["plan_code"] == "KIRO_ENTERPRISE_POWER"
 
 
-def test_billing_history_validation_and_failure(client):
+def test_billing_history_no_entry_and_unavailable(client):
+    with patch("app.usage._enabled", return_value=True), \
+         patch("app.usage.get_month_usage_by_user", return_value={}), \
+         patch("app.billing.get_billing_by_user", return_value={}):
+        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=9",
+                       headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    assert r.json()["has_usage_entry"] is False and r.json()["credit_used"] is None
+    assert r.json()["overage_rate"] == 0.04   # 默认单价兜底
+    with patch("app.usage._enabled", return_value=False), \
+         patch("app.usage.get_month_usage_by_user") as gm, \
+         patch("app.billing.get_billing_by_user", return_value={}):
+        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=9",
+                       headers=_auth(ADMIN, "Admin"))
+    assert r.json()["available"] is False and r.json()["source"] is None
+    gm.assert_not_called()
+
+
+def test_billing_history_validation(client):
     assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=13",
                       headers=_auth(ADMIN, "Admin")).status_code == 400
     assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
                       headers=_auth(USER, "张三")).status_code == 403
-    with patch("app.billing.get_user_month_usage", side_effect=RuntimeError("HTTP 403")):
-        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
-                       headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 502 and "HTTP 403" in r.json()["detail"]

@@ -104,21 +104,33 @@ export interface AccountRow {
   billing_account_status: string | null
   billing_pending_plan: string | null
   billing_pending_scheduled: string | null
-  billing_credit_used: number | null
   billing_credit_limit: number | null
-  billing_overage_charges: number | null
   billing_overage_rate: number | null
+  // 本月已用 / 超额 credits：User Activity Report 本月聚合（活动口径，日级）；null = 报表不可用
+  billing_credit_used: number | null
+  billing_credit_used_source: 'athena_mtd' | null
+  billing_overage_credits: number | null
+  billing_overage_charges: number | null   // 预估 = 超额 credits × 单价
+  // 订阅计费服务原值（企业用户恒为 0，仅对照）
+  billing_zorn_credit_used: number | null
+  billing_zorn_overage_charges: number | null
 }
 export interface BillingHistory {
   user_id: string
   year: number
   month: number
-  credit_used: number | null
-  credit_limit: number | null
-  credit_unit: string | null
-  overage_charges: number | null
-  overage_rate: number | null
+  source: 'athena' | null
+  available: boolean
   has_usage_entry: boolean
+  credit_used: number | null
+  overage_credits: number | null
+  overage_rate: number
+  overage_charges_est: number | null
+  messages: number | null
+  active_days: number | null
+  last_active: string | null
+  credit_limit: number | null
+  plan_code: string | null
 }
 export const getBillingHistory = (kiro_user_id: string, year: number, month: number) =>
   api.get<BillingHistory>(`/api/admin/accounts/${kiro_user_id}/billing-history`, { params: { year, month } })

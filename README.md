@@ -40,7 +40,7 @@
 |---|---|
 | ![账号明细](docs/screenshots/11-admin-flat-selection.png) | ![停用核对弹窗](docs/screenshots/12-deactivate-review-modal.png) |
 
-**管理端 · 账单回溯**：按 UTC 自然月查询某账号的额度 / 用量 / 超额，用于出账对账与计费争议取证
+**管理端 · 账单回溯**：按 UTC 自然月查询某账号的已用 / 超额 credits、预估超额费与活跃天数（数据源 User Activity Report，与控制台 Dashboard 一致），用于出账对账与计费争议取证
 
 ![账单回溯](docs/screenshots/13-billing-history-modal.png)
 

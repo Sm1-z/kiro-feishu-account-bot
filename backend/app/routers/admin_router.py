@@ -80,13 +80,15 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
       前端以 live 为准展示、快照留作对照。实况拉取失败时 live_synced=False 降级。
     - 用量关联键 = kiro_user_id = Athena 表 userid，应用层拼接；
       Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
-    - 费用/额度（billing_* 字段）直读订阅计费服务，按用户查询（Kiro Enterprise）：本周期已产生费用、
-      月额度与当前用量、超额费用；失败时 billing_synced=False、字段 None，不阻断列表。
+    - 费用/额度（billing_* 字段）：套餐、本周期费用、月额度、超额单价直读订阅计费服务（按用户，Kiro Enterprise）；
+      **本月已用 credits 与超额 credits 取自 User Activity Report 的本月聚合（活动口径，日级）**——
+      计费服务的按用户 currentUsage 对企业用户恒为 0（其按用户查询读的是个人版的聚合键，源码确认），
+      原值保留在 billing_zorn_* 字段作对照。超额费用 = 本月超额 credits × 超额单价（预估）。
     - force=true 时绕过用量/费用 TTL 缓存强制重查（刷新按钮用）。
     """
-    from app.billing import get_billing_by_user
+    from app.billing import DEFAULT_OVERAGE_RATE, get_billing_by_user
     from app.provisioner import live_subscription_map
-    from app.usage import get_usage_by_user
+    from app.usage import get_current_month_usage_by_user, get_usage_by_user
 
     store = MappingStore()
     items, kwargs = [], {}
@@ -106,12 +108,20 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
     usage = get_usage_by_user(force=force)  # {userid: {...}}，失败返回 {}
     user_ids = [it.get("kiro_user_id", "") for it in items]
     billing = get_billing_by_user(user_ids, force=force)  # {userid: {...}}，失败返回 {}
+    month_usage = get_current_month_usage_by_user(force=force)  # {userid: {credits, overage, ...}}，失败返回 {}
+    month_available = bool(month_usage)
     out = []
     for it in items:
         uid = it.get("kiro_user_id", "")
         u = usage.get(uid)
         lv = live.get(uid)
         b = billing.get(uid)
+        mu = month_usage.get(uid)
+        # 本月已用 / 超额 credits：报表可用但该用户无记录 = 0；报表不可用 = None
+        mtd_credits = mu["credits"] if mu else (0.0 if month_available else None)
+        mtd_overage = mu["overage"] if mu else (0.0 if month_available else None)
+        rate = (b or {}).get("overage_rate") or DEFAULT_OVERAGE_RATE
+        overage_est = round(mtd_overage * rate, 4) if mtd_overage is not None else None
         out.append({
             "kiro_user_id": uid,
             "feishu_open_id": it.get("feishu_open_id", ""),
@@ -142,10 +152,16 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
             "billing_account_status": (b or {}).get("account_status"),
             "billing_pending_plan": (b or {}).get("pending_plan"),
             "billing_pending_scheduled": (b or {}).get("pending_scheduled"),
-            "billing_credit_used": (b or {}).get("credit_used"),
             "billing_credit_limit": (b or {}).get("credit_limit"),
-            "billing_overage_charges": (b or {}).get("overage_charges"),
             "billing_overage_rate": (b or {}).get("overage_rate"),
+            # 本月已用 / 超额：活动口径（User Activity Report 本月聚合），None = 报表不可用
+            "billing_credit_used": mtd_credits,
+            "billing_credit_used_source": "athena_mtd" if month_available else None,
+            "billing_overage_credits": mtd_overage,
+            "billing_overage_charges": overage_est,  # 预估 = 超额 credits × 单价
+            # 订阅计费服务原值（企业用户恒为 0，仅作对照）
+            "billing_zorn_credit_used": (b or {}).get("credit_used"),
+            "billing_zorn_overage_charges": (b or {}).get("overage_charges"),
         })
     return out
 
@@ -153,19 +169,37 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
 @router.get("/accounts/{kiro_user_id}/billing-history")
 def billing_history(kiro_user_id: str, year: int, month: int,
                     _: CurrentUser = Depends(require_admin)):
-    """某账号某月的额度/用量/超额（历史回溯，出账对账 / 计费争议用）。
+    """某账号某月的用量 / 超额（历史回溯，出账对账 / 计费争议用）。
 
-    订阅计费服务要求时间窗 endTime = 月末 23:59:59 UTC，由 billing.month_range 保证。
-    无该月数据时 has_usage_entry=False、数值字段 None。
+    数据源 = User Activity Report 按自然月聚合（活动口径）。订阅计费服务的按用户历史对企业用户为空，不用。
+    月额度与超额单价取当前订阅（计费服务），用于换算超额预估费用。
+    available=False 表示报表未配置/不可用；has_usage_entry=False 表示该月无记录。
     """
-    from app.billing import get_user_month_usage
+    from app import usage as usage_mod
+    from app.billing import DEFAULT_OVERAGE_RATE, get_billing_by_user
 
     if not (2024 <= year <= 2100) or not (1 <= month <= 12):
         raise HTTPException(400, "year/month 不合法")
-    try:
-        return get_user_month_usage(kiro_user_id, year, month)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"查询失败: {exc}")
+    available = usage_mod._enabled()
+    data = usage_mod.get_month_usage_by_user(year, month) if available else {}
+    mu = data.get(kiro_user_id)
+    b = (get_billing_by_user([kiro_user_id]) or {}).get(kiro_user_id) or {}
+    rate = b.get("overage_rate") or DEFAULT_OVERAGE_RATE
+    out = {
+        "user_id": kiro_user_id, "year": year, "month": month,
+        "source": "athena" if available else None, "available": available,
+        "has_usage_entry": bool(mu),
+        "credit_used": mu["credits"] if mu else None,
+        "overage_credits": mu["overage"] if mu else None,
+        "overage_rate": rate,
+        "overage_charges_est": round(mu["overage"] * rate, 4) if mu else None,
+        "messages": mu["messages"] if mu else None,
+        "active_days": mu["active_days"] if mu else None,
+        "last_active": mu["last_active"] if mu else None,
+        "credit_limit": b.get("credit_limit"),   # 当前套餐额度，仅供参照
+        "plan_code": b.get("plan_code"),
+    }
+    return out
 
 
 @router.get("/overage-cap")

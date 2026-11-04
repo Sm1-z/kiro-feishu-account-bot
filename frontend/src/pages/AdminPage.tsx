@@ -194,9 +194,11 @@ function aggregateByPerson(rows: AccountRow[]): PersonRow[] {
     }
     p.accounts.push(r)
     p.account_count += 1
-    if (r.usage_credits != null) { p.credits += r.usage_credits; p.has_usage = true }
-    if (r.usage_messages != null) { p.messages += r.usage_messages; p.has_usage = true }
-    if (r.usage_last_active && r.usage_last_active > p.last_active) p.last_active = r.usage_last_active
+    // 本月口径：credits / 消息来自 User Activity Report 本月聚合（累计值仍在 API 中，界面不再展示）
+    if (r.billing_credit_used != null) { p.credits += r.billing_credit_used; p.has_usage = true }
+    if (r.usage_month_messages != null) { p.messages += r.usage_month_messages; p.has_usage = true }
+    const la = r.usage_month_last_active || r.usage_last_active
+    if (la && la > p.last_active) p.last_active = la
   }
   return [...map.values()].sort((a, b) => b.credits - a.credits)
 }
@@ -306,9 +308,9 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
     results.map((r) => [r.username, r.user_id, r.success ? 'success' : 'failed', r.error, mode, recycle ? 'yes' : 'no']))
   const exportList = () => downloadCsv(
     `kiro-deactivate-list-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['username', 'feishu_name', 'role', 'team', 'tier', 'current_charges', 'credits'],
+    ['username', 'feishu_name', 'role', 'team', 'tier', 'current_charges', 'month_credits'],
     rows.map((r) => [r.kiro_username, r.feishu_name, r.account_role, r.team,
-      (r.live_synced ? r.live_tier : r.tier) || '', r.billing_current_charges, r.usage_credits]))
+      (r.live_synced ? r.live_tier : r.tier) || '', r.billing_current_charges, r.billing_credit_used]))
 
   const reviewCols = [
     { title: '用户名', dataIndex: 'kiro_username', sorter: (a: AccountRow, b: AccountRow) => a.kiro_username.localeCompare(b.kiro_username) },
@@ -321,8 +323,8 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
     { title: '本月费用', dataIndex: 'billing_current_charges', align: 'right' as const,
       render: (v: number | null, r: AccountRow) => fmtMoney(v, r.billing_currency),
       sorter: (a: AccountRow, b: AccountRow) => (a.billing_current_charges ?? 0) - (b.billing_current_charges ?? 0) },
-    { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits,
-      sorter: (a: AccountRow, b: AccountRow) => (a.usage_credits ?? 0) - (b.usage_credits ?? 0) },
+    { title: '本月 credits', dataIndex: 'billing_credit_used', align: 'right' as const, render: fmtCredits,
+      sorter: (a: AccountRow, b: AccountRow) => (a.billing_credit_used ?? 0) - (b.billing_credit_used ?? 0) },
     { title: '', key: 'rm', width: 56, render: (_: any, r: AccountRow) => (
       <Button size="small" type="text" danger onClick={() => remove(r.kiro_user_id)} aria-label={`移除 ${r.kiro_username}`}>移除</Button>
     ) },
@@ -510,8 +512,8 @@ function AccountsPanel() {
   // ── 指标卡 ──
   const totalAccounts = rows.length
   const totalPeople = people.length
-  const totalCredits = rows.reduce((s, r) => s + (r.usage_credits ?? 0), 0)
-  const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length
+  const totalCredits = rows.reduce((s, r) => s + (r.billing_credit_used ?? 0), 0)  // 本月全员 credits
+  const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length     // 本月有用量的人
   // Overages 上限是 profile 级单一值（USD/订阅）；最坏敞口 = 账号数 × 上限
   const worstOverage = cap != null ? totalAccounts * cap.value : null
   // 本月预估账单 = Σ 本周期订阅费 + Σ 超额费用（计费口径，直读订阅计费服务）
@@ -543,14 +545,14 @@ function AccountsPanel() {
     (!fTiers.length || fTiers.includes(effTier(r))) &&
     (!fRole || r.account_role === fRole) &&
     (!fStatus || effStatus(r) === fStatus) &&
-    (fCreditsLt == null || (r.usage_credits ?? 0) < fCreditsLt) &&
+    (fCreditsLt == null || (r.billing_credit_used ?? 0) < fCreditsLt) &&
     (fInactiveDays == null || daysSince(r.usage_last_active) >= fInactiveDays))
   const filterDesc = [
     fTeams.length ? `分组 ${fTeams.join('/')}` : '',
     fTiers.length ? `Tier ${fTiers.join('/')}` : '',
     fRole ? (fRole === 'primary' ? '主账号' : '副账号') : '',
     fStatus ? `状态 ${fStatus}` : '',
-    fCreditsLt != null ? `Credits < ${fCreditsLt}` : '',
+    fCreditsLt != null ? `本月 Credits < ${fCreditsLt}` : '',
     fInactiveDays != null ? `${fInactiveDays} 天未活跃` : '',
   ].filter(Boolean).join(' · ')
   const resetFilters = () => { setFTeams([]); setFTiers([]); setFRole(undefined); setFStatus(undefined); setFCreditsLt(null); setFInactiveDays(null) }
@@ -561,7 +563,7 @@ function AccountsPanel() {
     setFRole('secondary'); setFCreditsLt(fCreditsLt ?? 50)
     const th = fCreditsLt ?? 50
     selectSecondaryOf(rows.filter((r) =>
-      (!fTeams.length || fTeams.includes(r.team)) && (r.usage_credits ?? 0) < th))
+      (!fTeams.length || fTeams.includes(r.team)) && (r.billing_credit_used ?? 0) < th))
   }
   const presetWholeTeam = () => {
     if (!fTeams.length) { message.info('先在「分组」里选择一个或多个组'); return }
@@ -618,8 +620,7 @@ function AccountsPanel() {
           {fmtMoney(v, r.billing_currency)}
         </span>
       ) },
-    { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits },
-    { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const, render: fmtNum },
+    { title: '本月消息', dataIndex: 'usage_month_messages', align: 'right' as const, render: fmtNum },
     { title: '最后活跃', dataIndex: 'usage_last_active',
       render: (v: string | null) => v || <span style={{ color: '#ccc' }}>—</span> },
     { title: '操作', key: 'ops', render: (_: any, r: AccountRow) => (
@@ -643,11 +644,11 @@ function AccountsPanel() {
     { title: '飞书用户', dataIndex: 'feishu_name' },
     { title: '账号数', dataIndex: 'account_count', align: 'right' as const,
       render: (n: number) => <Tag>{n}</Tag> },
-    { title: 'Credits（汇总）', dataIndex: 'credits', align: 'right' as const,
+    { title: '本月已用（汇总）', dataIndex: 'credits', align: 'right' as const,
       defaultSortOrder: 'descend' as const,
-      render: (v: number, p: PersonRow) => p.has_usage ? v.toFixed(2) : <span style={{ color: '#ccc' }}>—</span>,
+      render: (v: number, p: PersonRow) => p.has_usage ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : <span style={{ color: '#ccc' }}>—</span>,
       sorter: (a: PersonRow, b: PersonRow) => a.credits - b.credits },
-    { title: '消息数（汇总）', dataIndex: 'messages', align: 'right' as const,
+    { title: '本月消息（汇总）', dataIndex: 'messages', align: 'right' as const,
       render: (v: number, p: PersonRow) => p.has_usage ? v.toLocaleString() : <span style={{ color: '#ccc' }}>—</span>,
       sorter: (a: PersonRow, b: PersonRow) => a.messages - b.messages },
     { title: '最后活跃', dataIndex: 'last_active',
@@ -666,8 +667,8 @@ function AccountsPanel() {
       <Row gutter={16}>
         <Col span={3}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
         <Col span={3}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
-        <Col span={4}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
-        <Col span={3}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="本月 Credits（全员）" value={totalCredits} precision={1} /></Card></Col>
+        <Col span={3}><Card size="small"><Statistic title="本月有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
         <Col span={5}>
           <Card size="small">
             <Statistic title="本月预估账单" prefix="$" value={billingRows.length ? billSubs + billOver : '—'} precision={2}
@@ -757,7 +758,7 @@ function AccountsPanel() {
       {/* 图表 */}
       <Row gutter={16}>
         <Col span={14}>
-          <Card size="small" title="Top 用户 · Credits（按人汇总）">
+          <Card size="small" title="Top 用户 · 本月 Credits（按人汇总）">
             <HBarChart data={topByCredits} />
           </Card>
         </Col>
@@ -795,10 +796,10 @@ function AccountsPanel() {
           </Space>
         }>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
-          一人多账号已合并为一行，Credits/消息为名下所有账号汇总；点行首 ▸ 展开看每个子账号。
+          一人多账号已合并为一行，本月已用/本月消息为名下所有账号的本月汇总；点行首 ▸ 展开看每个子账号。
           Tier/订阅状态为 AWS 实时数据（控制台的退订/改套餐也会反映）；
           用量来自 Kiro Analytics（Athena，约每日更新），点「刷新」强制重查。— 表示暂无数据。
-          「本月费用」与月额度直读 Kiro 订阅计费服务（实时）；「本月已用 / 超额（预估）」与 Credits/消息数来自 User Activity Report（活动口径，日级延迟约 1 天）；点「账单」可按月回溯。
+          「本月费用」与月额度直读 Kiro 订阅计费服务（实时）；「本月已用 / 超额（预估）」与本月消息来自 User Activity Report（活动口径，按 UTC 自然月，日级延迟约 1 天，与控制台 Dashboard 一致）；点「账单」可按月回溯。
           子账号行的「停用」= 控制台 Deactivate Kiro plan（可选月底 / 立即），已停用（CANCELLED）的行显示「恢复」可撤销；「批量停用 / 回收」可一次处理多个低用量副账号。
         </Typography.Paragraph>
         {view === 'person' ? (
@@ -830,8 +831,8 @@ function AccountsPanel() {
               <Select allowClear placeholder="订阅状态" style={{ width: 130 }} value={fStatus} onChange={setFStatus}
                 options={[{ value: 'ACTIVE', label: 'ACTIVE' }, { value: 'PENDING', label: 'PENDING' },
                           { value: 'CANCELLED', label: 'CANCELLED' }, { value: 'NONE', label: '无订阅' }]} />
-              <InputNumber placeholder="不限" style={{ width: 170 }} min={0} value={fCreditsLt}
-                onChange={(v) => setFCreditsLt(v)} addonBefore="Credits <" />
+              <InputNumber placeholder="不限" style={{ width: 190 }} min={0} value={fCreditsLt}
+                onChange={(v) => setFCreditsLt(v)} addonBefore="本月 Credits <" />
               <InputNumber placeholder="天" style={{ width: 150 }} min={1} value={fInactiveDays}
                 onChange={(v) => setFInactiveDays(v)} addonBefore="未活跃 ≥" addonAfter="天" />
               <Button size="small" onClick={resetFilters}>清除筛选</Button>
@@ -840,7 +841,7 @@ function AccountsPanel() {
             {/* 预设 */}
             <Space size={8}>
               <span style={{ fontSize: 12, color: '#888' }}>快速选择：</span>
-              <Button size="small" onClick={presetLowUsage}>低用量副账号（Credits &lt; {fCreditsLt ?? 50}）</Button>
+              <Button size="small" onClick={presetLowUsage}>低用量副账号（本月 Credits &lt; {fCreditsLt ?? 50}）</Button>
               <Button size="small" onClick={presetWholeTeam} disabled={!fTeams.length}>选中本组全部副账号</Button>
               <Button size="small" onClick={() => selectSecondaryOf(filtered)}>选中当前匹配的副账号</Button>
               <span style={{ fontSize: 12, color: '#888' }}>预设只选副账号；主账号需手动勾选。</span>

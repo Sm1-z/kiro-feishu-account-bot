@@ -106,6 +106,10 @@ export interface AccountRow {
   billing_pending_scheduled: string | null
   billing_credit_limit: number | null
   billing_overage_rate: number | null
+  // 本月活动（User Activity Report 本月聚合）；null = 报表不可用
+  usage_month_messages: number | null
+  usage_month_active_days: number | null
+  usage_month_last_active: string | null
   // 本月已用 / 超额 credits：User Activity Report 本月聚合（活动口径，日级）；null = 报表不可用
   billing_credit_used: number | null
   billing_credit_used_source: 'athena_mtd' | null

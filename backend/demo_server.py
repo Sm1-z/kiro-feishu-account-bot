@@ -132,7 +132,7 @@ DEMO_BILLING = {
 }
 # 本月已用 / 超额 credits（User Activity Report 本月聚合，活动口径）；王五超限 10120/10000、超额 120 credits → 预估 $4.80
 DEMO_MONTH_USAGE = {
-    "u-001": {"credits": 862.5, "overage": 0.0, "messages": 4210, "active_days": 3, "last_active": "2026-07-06"},
+    "u-001": {"credits": 612.5, "overage": 0.0, "messages": 2980, "active_days": 3, "last_active": "2026-07-06"},
     "u-002": {"credits": 35.3, "overage": 0.0, "messages": 102, "active_days": 2, "last_active": "2026-06-28"},
     "u-003": {"credits": 1740.8, "overage": 0.0, "messages": 2874, "active_days": 5, "last_active": "2026-07-07"},
     "u-004": {"credits": 10120.0, "overage": 120.0, "messages": 6031, "active_days": 6, "last_active": "2026-07-07"},

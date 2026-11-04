@@ -30,7 +30,7 @@
 |---|---|
 | ![用户 Dashboard](docs/screenshots/02-user-dashboard.png) | ![申请弹窗](docs/screenshots/03-apply-modal.png) |
 
-**管理端 · 账号总览**：指标卡（含「本月预估账单」）+ Top 用户 Credits + Tier 分布 + 按人聚合表（展开子账号可见本月费用 / 额度用量 / 超额，Kiro Enterprise 计费直读）
+**管理端 · 账号总览**：指标卡（本月 Credits / 本月预估账单）+ Top 用户本月 Credits + Tier 分布 + 按人聚合表（展开子账号可见本月费用 / 本月已用 ÷ 额度 / 超额预估 / 本月消息；费用与额度直读 Kiro Enterprise 订阅计费，用量取自 User Activity Report 本月聚合）
 
 ![账号总览](docs/screenshots/05-admin-accounts.png)
 

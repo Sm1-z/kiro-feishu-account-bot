@@ -280,12 +280,15 @@ def test_accounts_include_billing_fields(client):
     assert u1["billing_overage_credits"] == 25.0
     assert u1["billing_overage_charges"] == 1.0           # 25 × 0.04 预估
     assert u1["billing_zorn_credit_used"] == 1234.5 and u1["billing_zorn_overage_charges"] == 3.2
+    assert u1["usage_month_messages"] == 73 and u1["usage_month_active_days"] == 1
+    assert u1["usage_month_last_active"] == "2026-11-03"
     assert u1["billing_account_status"] == "ACTIVE"
     # 报表可用但该用户本月无记录 → 0；没有计费数据 → synced=False、套餐字段 None，列表不中断
     u2 = rows["u2"]
     assert u2["billing_synced"] is False and u2["billing_error"] == "unavailable"
     assert u2["billing_current_charges"] is None and u2["billing_credit_limit"] is None
     assert u2["billing_credit_used"] == 0.0 and u2["billing_overage_credits"] == 0.0
+    assert u2["usage_month_messages"] == 0 and u2["usage_month_last_active"] is None
     assert u2["billing_overage_charges"] == 0.0           # 无单价时用默认 0.04 × 0
 
 
@@ -300,6 +303,7 @@ def test_accounts_month_usage_unavailable_gives_none(client):
     row = r.json()[0]
     assert row["billing_credit_used"] is None and row["billing_credit_used_source"] is None
     assert row["billing_overage_charges"] is None
+    assert row["usage_month_messages"] is None and row["usage_month_active_days"] is None
     assert row["billing_credit_limit"] == 10000.0   # 额度仍来自计费服务
 
 

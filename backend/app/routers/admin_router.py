@@ -154,6 +154,10 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
             "billing_pending_scheduled": (b or {}).get("pending_scheduled"),
             "billing_credit_limit": (b or {}).get("credit_limit"),
             "billing_overage_rate": (b or {}).get("overage_rate"),
+            # 本月活动（User Activity Report 本月聚合）：消息数 / 活跃天数 / 最后活跃；None = 报表不可用
+            "usage_month_messages": (mu["messages"] if mu else (0 if month_available else None)),
+            "usage_month_active_days": (mu["active_days"] if mu else (0 if month_available else None)),
+            "usage_month_last_active": (mu["last_active"] if mu and mu.get("last_active") else None),
             # 本月已用 / 超额：活动口径（User Activity Report 本月聚合），None = 报表不可用
             "billing_credit_used": mtd_credits,
             "billing_credit_used_source": "athena_mtd" if month_available else None,

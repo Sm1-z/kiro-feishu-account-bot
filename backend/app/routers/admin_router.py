@@ -81,9 +81,9 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
     - 用量关联键 = kiro_user_id = Athena 表 userid，应用层拼接；
       Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
     - 费用/额度（billing_* 字段）：套餐、本周期费用、月额度、超额单价直读订阅计费服务（按用户，Kiro Enterprise）；
-      **本月已用 credits 与超额 credits 取自 User Activity Report 的本月聚合（活动口径，日级）**——
-      计费服务的按用户 currentUsage 对企业用户恒为 0（其按用户查询读的是个人版的聚合键，源码确认），
-      原值保留在 billing_zorn_* 字段作对照。超额费用 = 本月超额 credits × 超额单价（预估）。
+      **本月已用 credits 与超额 credits 取自 User Activity Report 的本月聚合（活动口径，日级）**，
+      与 Kiro 控制台 Dashboard 一致；计费服务返回的用量字段仅作参考，保留在 billing_reported_* 字段。
+      超额费用 = 本月超额 credits × 超额单价（预估）。
     - force=true 时绕过用量/费用 TTL 缓存强制重查（刷新按钮用）。
     """
     from app.billing import DEFAULT_OVERAGE_RATE, get_billing_by_user
@@ -163,9 +163,9 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
             "billing_credit_used_source": "athena_mtd" if month_available else None,
             "billing_overage_credits": mtd_overage,
             "billing_overage_charges": overage_est,  # 预估 = 超额 credits × 单价
-            # 订阅计费服务原值（企业用户恒为 0，仅作对照）
-            "billing_zorn_credit_used": (b or {}).get("credit_used"),
-            "billing_zorn_overage_charges": (b or {}).get("overage_charges"),
+            # 订阅计费服务返回的用量字段（仅作参考）
+            "billing_reported_credit_used": (b or {}).get("credit_used"),
+            "billing_reported_overage_charges": (b or {}).get("overage_charges"),
         })
     return out
 

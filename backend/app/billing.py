@@ -14,8 +14,8 @@
 设计要点：
 - **只读、降级安全**：任一用户查询失败 → 该用户字段为 None，不阻断账号列表；两接口相互独立。
 - **TTL 缓存 60s**：/accounts 每次开页都打；按用户逐个调用，用线程池并发。
-- 口径提示：currentUsage 的时效/口径与 Dashboard 存在差异（2026-11 实测曾为 0 而 Dashboard 有用量），
-  前端标注「计费口径」，Athena 用量列保留作对照。
+- 口径提示：按用户的本月用量以 User Activity Report 为准（与控制台 Dashboard 一致）；
+  本模块返回的 credit_used / overage_charges 仅作参考，界面以报表月聚合展示。
 """
 from __future__ import annotations
 

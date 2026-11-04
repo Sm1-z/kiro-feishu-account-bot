@@ -1,4 +1,4 @@
-"""billing 模块单测：Zorn 按用户费用/用量的扁平化、降级、缓存、历史月时间窗。"""
+"""billing 模块单测：订阅计费服务按用户费用/用量的扁平化、降级、缓存、历史月时间窗。"""
 import datetime as _dt
 import json
 import os

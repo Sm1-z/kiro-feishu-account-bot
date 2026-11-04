@@ -120,9 +120,8 @@ def get_usage_by_user(force: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # 按自然月聚合（额度用量分子 / 账单回溯）
 # ---------------------------------------------------------------------------
-# 为什么不用订阅计费服务的 currentUsage：Kiro Enterprise 用户的用量在计费服务里按订阅 ARN 聚合，
-# 其按用户查询接口读的是个人版的键，对企业用户恒为 0（2026-11 实测 + 源码确认）。
-# User Activity Report（本表）是企业侧按用户 credits 的权威来源，与 Kiro 控制台 Dashboard 一致，日级延迟约 1 天。
+# User Activity Report（本表）是企业侧按用户 credits 的权威来源，与 Kiro 控制台 Dashboard 一致，日级延迟约 1 天；
+# 订阅计费服务返回的按用户用量字段仅作参考（2026-11 实测与报表/Dashboard 不一致）。
 _month_cache: dict = {}  # {"YYYY-MM": {"ts": float, "data": dict}}
 
 

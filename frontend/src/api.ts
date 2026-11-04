@@ -115,9 +115,9 @@ export interface AccountRow {
   billing_credit_used_source: 'athena_mtd' | null
   billing_overage_credits: number | null
   billing_overage_charges: number | null   // 预估 = 超额 credits × 单价
-  // 订阅计费服务原值（企业用户恒为 0，仅对照）
-  billing_zorn_credit_used: number | null
-  billing_zorn_overage_charges: number | null
+  // 订阅计费服务返回的用量字段（仅参考）
+  billing_reported_credit_used: number | null
+  billing_reported_overage_charges: number | null
 }
 export interface BillingHistory {
   user_id: string

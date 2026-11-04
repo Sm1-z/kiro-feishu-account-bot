@@ -279,7 +279,7 @@ def test_accounts_include_billing_fields(client):
     assert u1["billing_credit_used"] == 89.46 and u1["billing_credit_used_source"] == "athena_mtd"
     assert u1["billing_overage_credits"] == 25.0
     assert u1["billing_overage_charges"] == 1.0           # 25 × 0.04 预估
-    assert u1["billing_zorn_credit_used"] == 1234.5 and u1["billing_zorn_overage_charges"] == 3.2
+    assert u1["billing_reported_credit_used"] == 1234.5 and u1["billing_reported_overage_charges"] == 3.2
     assert u1["usage_month_messages"] == 73 and u1["usage_month_active_days"] == 1
     assert u1["usage_month_last_active"] == "2026-11-03"
     assert u1["billing_account_status"] == "ACTIVE"

@@ -15,6 +15,8 @@
 | 账号治理 | UserId 锚点 + 一人多账号（主/副）+ DynamoDB 映射为唯一真相源 |
 | 用量看板 | 对接 Kiro Analytics，管理端账号总览按人聚合 + 用量图表 |
 | 超额治理 | Overages 上限展示 + 应用内调高（2 倍护栏 + 审计）+ 最坏月超额敞口测算 |
+| 费用与额度 | 直读 Kiro Enterprise 订阅计费：按账号本月费用 / 额度用量 / 超额 + 「本月预估账单」+ 按月账单回溯 |
+| 停用 / 恢复 | 对齐控制台 Deactivate Kiro plan（月底 / 立即）+ 一键恢复；明细视图筛选勾选 + 预设 + 核对弹窗批量停用 / 回收，逐账号审计 |
 | 存量导入 | 扫描 IDC 游离账号，邮箱/拼音双级归属建议，绑定即纳管 |
 | 分组管理 | 管理端直接新建 IDC Group，申请表单实时生效 |
 
@@ -28,9 +30,19 @@
 |---|---|
 | ![用户 Dashboard](docs/screenshots/02-user-dashboard.png) | ![申请弹窗](docs/screenshots/03-apply-modal.png) |
 
-**管理端 · 账号总览**：指标卡 + Top 用户 Credits + Tier 分布 + 按人聚合表（可展开下钻子账号）
+**管理端 · 账号总览**：指标卡（含「本月预估账单」）+ Top 用户 Credits + Tier 分布 + 按人聚合表（展开子账号可见本月费用 / 额度用量 / 超额，Kiro Enterprise 计费直读）
 
 ![账号总览](docs/screenshots/05-admin-accounts.png)
+
+**管理端 · 批量停用 / 回收**：切到「账号明细」按分组 / Tier / 用量筛选，预设一键勾选低用量副账号（预设只选副账号，勾中主账号红色计数提示）→ 弹窗只做「核对 + 确认」：汇总条、可排序过滤的核对表、逐行移除、月底 / 立即两种停用方式、名单较多时须输入账号数确认
+
+| 账号明细（筛选 / 勾选） | 核对 + 确认弹窗 |
+|---|---|
+| ![账号明细](docs/screenshots/11-admin-flat-selection.png) | ![停用核对弹窗](docs/screenshots/12-deactivate-review-modal.png) |
+
+**管理端 · 账单回溯**：按 UTC 自然月查询某账号的额度 / 用量 / 超额，用于出账对账与计费争议取证
+
+![账单回溯](docs/screenshots/13-billing-history-modal.png)
 
 **管理端 · 成本治理**：Overages 超额上限应用内调高（单向性警告 + 2 倍护栏 + 敞口预览）
 
@@ -49,17 +61,18 @@ backend/app/
 ├── config.py        配置层（pydantic-settings，仅资源标识，无密钥字段）
 ├── aws.py           AWS 会话/凭证唯一出口（默认链=Role，无 AK/SK 读取路径）
 ├── mapping_store.py DynamoDB 映射层（PK=kiro_user_id, GSI=feishu_open_id，1:N，主/副）
-├── provisioner.py   开通/升级/取消/查询/批量（幂等 + 429 退避）
+├── provisioner.py   开通/升级/停用(月底|立即)/恢复/回收/查询/批量（幂等 + 429 退避）
 ├── resolver.py      关联解析器（运行态零探测 + 迁移期 email/拼音兜底）
 ├── request_store.py 申请/审批记录 + 状态机条件更新防重
 ├── approval.py      审批执行引擎（抢占防重 + 异步执行 + 写映射）
 ├── quotas.py        Overages 超额上限查询/调高（Service Quotas + TTL 缓存 + 增量护栏）
+├── billing.py       按用户费用/额度/超额 + 历史月回溯（订阅计费服务直读，60s 缓存，降级安全）
 ├── feishu.py        飞书 OAuth + 卡片收发
 ├── cards.py         飞书卡片模板
 ├── feishu_ws.py     WS 长连接（免公网，先 ACK 后异步）
 ├── auth.py          JWT + 认证依赖
 ├── schemas.py       API 请求模型
-├── routers/         auth / request / admin 路由（21 API）
+├── routers/         auth / request / admin 路由（24 API）
 └── main.py          FastAPI 入口（启动 WS + 托管前端）
 frontend/            React + TS + AntD（登录/Dashboard/审批面板）
 infra/

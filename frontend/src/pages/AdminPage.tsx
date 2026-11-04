@@ -6,18 +6,23 @@ import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Space, Segmented, message, Popconfirm,
   Typography, Layout, Tabs, Row, Col, Statistic, Modal, InputNumber, Alert, Input, Select,
+  Radio, Checkbox,
 } from 'antd'
 import {
   adminRequests, approve, reject, getAccounts, getOverageCap, raiseOverageCap,
-  getGroups, createGroup, getUnlinked, getFeishuUsers, linkUnlinked,
-  ReqItem, AccountRow, OverageCapInfo, UnlinkedAccount, FeishuUser,
+  getGroups, createGroup, getUnlinked, getFeishuUsers, linkUnlinked, deactivateAccounts, reactivateAccounts,
+  getBillingHistory,
+  ReqItem, AccountRow, OverageCapInfo, UnlinkedAccount, FeishuUser, DeletionMode, DeactivateResult, BillingHistory,
 } from '../api'
 import { HBarChart, DonutChart } from '../components/MiniCharts'
 
 const { Header, Content } = Layout
 const { Title } = Typography
 
-const TYPE_LABEL: any = { apply: '开通', upgrade: '升级', quota_increase: '配额', overage_cap: '超额上限' }
+const TYPE_LABEL: any = {
+  apply: '开通', upgrade: '升级', quota_increase: '配额', overage_cap: '超额上限',
+  deactivate: '停用', recycle: '回收', reactivate: '恢复订阅',
+}
 const STATUS_COLOR: any = {
   pending: 'orange', approved: 'blue', executed: 'green', failed: 'red', rejected: 'default',
 }
@@ -27,6 +32,72 @@ const fmtNum = (v: number | null) =>
   v === null || v === undefined ? <span style={{ color: '#ccc' }}>—</span> : v.toLocaleString()
 const fmtCredits = (v: number | null) =>
   v === null || v === undefined ? <span style={{ color: '#ccc' }}>—</span> : v.toFixed(2)
+const fmtMoney = (v: number | null, cur = 'USD') =>
+  v === null || v === undefined
+    ? <span style={{ color: '#ccc' }}>—</span>
+    : <span>{cur === 'USD' ? '$' : `${cur} `}{v.toFixed(2)}</span>
+// 套餐代码 → 展示名（KIRO_ENTERPRISE_PRO_MAX → Pro Max）
+const planLabel = (code: string | null) => {
+  if (!code) return '—'
+  const m: Record<string, string> = {
+    KIRO_ENTERPRISE_PRO: 'Pro', KIRO_ENTERPRISE_PRO_PLUS: 'Pro+',
+    KIRO_ENTERPRISE_PRO_MAX: 'Pro Max', KIRO_ENTERPRISE_POWER: 'Power',
+  }
+  return m[code] || code
+}
+
+/** 历史月账单弹窗：出账对账 / 计费争议时按月回溯某账号的额度、用量、超额。 */
+function BillingHistoryModal({ row, onClose }: { row: AccountRow | null; onClose: () => void }) {
+  const now = new Date()
+  const [year, setYear] = useState(now.getUTCFullYear())
+  const [month, setMonth] = useState(now.getUTCMonth() + 1)
+  const [data, setData] = useState<BillingHistory | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+
+  const query = async (y: number, m: number) => {
+    if (!row) return
+    setLoading(true); setErr(''); setData(null)
+    try { setData(await getBillingHistory(row.kiro_user_id, y, m)) }
+    catch (e: any) { setErr(e.response?.data?.detail || '查询失败') }
+    finally { setLoading(false) }
+  }
+  useEffect(() => {
+    if (row) { setYear(now.getUTCFullYear()); setMonth(now.getUTCMonth() + 1); query(now.getUTCFullYear(), now.getUTCMonth() + 1) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row])
+
+  const years = [now.getUTCFullYear() - 1, now.getUTCFullYear()]
+  return (
+    <Modal title={`账单回溯 · ${row?.kiro_username || ''}`} open={!!row} onCancel={onClose} footer={null} width={560}>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Space>
+          <Select value={year} onChange={(v) => { setYear(v); query(v, month) }} style={{ width: 100 }}
+            options={years.map((y) => ({ value: y, label: `${y}` }))} />
+          <Select value={month} onChange={(v) => { setMonth(v); query(year, v) }} style={{ width: 90 }}
+            options={Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: `${i + 1} 月` }))} />
+          <Button size="small" loading={loading} onClick={() => query(year, month)}>查询</Button>
+        </Space>
+        {err && <Alert type="error" showIcon message={err} />}
+        {data && !data.has_usage_entry && (
+          <Alert type="info" showIcon message={`${year} 年 ${month} 月无该账号的计费记录`}
+            description="该月没有生效的订阅，或计费服务尚未沉淀该月数据。" />
+        )}
+        {data && data.has_usage_entry && (
+          <Row gutter={12}>
+            <Col span={8}><Card size="small"><Statistic title="月额度" value={data.credit_limit ?? '—'} /></Card></Col>
+            <Col span={8}><Card size="small"><Statistic title="已用" value={data.credit_used ?? '—'} precision={1} /></Card></Col>
+            <Col span={8}><Card size="small"><Statistic title="超额费用" prefix="$" value={data.overage_charges ?? '—'} precision={2} /></Card></Col>
+          </Row>
+        )}
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          数据直读 Kiro 订阅计费服务（计费口径，按 UTC 自然月）；超额单价 {data?.overage_rate != null ? `$${data.overage_rate}/credit` : '—'}。
+          Athena 用量报表为活动口径，两者可能存在时效差。
+        </Typography.Text>
+      </Space>
+    </Modal>
+  )
+}
 
 function RequestsPanel() {
   const [filter, setFilter] = useState<string>('pending')
@@ -124,6 +195,243 @@ function aggregateByPerson(rows: AccountRow[]): PersonRow[] {
 const roleTag = (r: string) =>
   r === 'primary' ? <Tag color="gold">主</Tag> : <Tag>副</Tag>
 
+// 有可停用的订阅：实况优先；实况不可得时按快照
+const hasLiveSubscription = (r: AccountRow) =>
+  r.live_synced ? r.live_status != null && r.live_status !== 'CANCELLED' : r.status === 'active'
+
+const MODE_LABEL: Record<DeletionMode, string> = { end_of_period: '月底停用', immediate: '立即停用' }
+
+/** 停用 / 回收弹窗：复刻控制台「Deactivate Kiro plan」的 End of the month / Immediately 两个选项。 */
+const BATCH_LIMIT = 200           // 后端单次上限；超出前端自动分批
+const CONFIRM_TYPE_THRESHOLD = 10 // 名单 ≥ 此数时，确认须手动输入账号数
+
+const downloadCsv = (filename: string, header: string[], rows: (string | number | null | undefined)[][]) => {
+  const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  const csv = '﻿' + [header, ...rows].map((r) => r.map(esc).join(',')).join('\n')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+/** 停用 / 回收弹窗 = 「核对名单 + 选择方式 + 确认」。选人在明细表完成，弹窗不再提供补选。 */
+function DeactivateModal({ open, targets, summary, onClose, onDone }: {
+  open: boolean
+  targets: AccountRow[]            // 待停用名单（单行操作传 1 个；批量来自明细视图勾选）
+  summary?: string                 // 来源摘要（如「来自明细视图勾选：120 个账号（筛选：分组 Team-A · 副账号）」）
+  onClose: () => void
+  onDone: () => void
+}) {
+  const [rows, setRows] = useState<AccountRow[]>([])
+  const [mode, setMode] = useState<DeletionMode>('end_of_period')
+  const [recycle, setRecycle] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [results, setResults] = useState<DeactivateResult[] | null>(null)
+  const [kw, setKw] = useState('')
+  const [primaryOnly, setPrimaryOnly] = useState(false)
+  const [typed, setTyped] = useState('')
+
+  useEffect(() => {
+    if (open) {
+      setRows(targets); setMode('end_of_period'); setRecycle(false); setResults(null)
+      setKw(''); setPrimaryOnly(false); setTyped('')
+    }
+  }, [open, targets])
+
+  const n = rows.length
+  const primaryRows = rows.filter((r) => r.account_role === 'primary')
+  const byTeam = (() => {
+    const m = new Map<string, number>()
+    for (const r of rows) { const t = r.team || '（无分组）'; m.set(t, (m.get(t) || 0) + 1) }
+    return [...m.entries()].sort((a, b) => b[1] - a[1])
+  })()
+  const byTier = (() => {
+    const m = new Map<string, number>()
+    for (const r of rows) { const t = (r.live_synced ? r.live_tier : r.tier) || '—'; m.set(t, (m.get(t) || 0) + 1) }
+    return [...m.entries()].sort((a, b) => b[1] - a[1])
+  })()
+  const subsTotal = rows.reduce((s, r) => s + (r.billing_current_charges ?? 0), 0)
+  const hasBilling = rows.some((r) => r.billing_current_charges != null)
+
+  const shown = rows.filter((r) =>
+    (!primaryOnly || r.account_role === 'primary') &&
+    (!kw || `${r.kiro_username} ${r.feishu_name} ${r.team}`.toLowerCase().includes(kw.toLowerCase())))
+  const remove = (id: string) => setRows((cur) => cur.filter((r) => r.kiro_user_id !== id))
+
+  const needType = n >= CONFIRM_TYPE_THRESHOLD
+  const typedOk = !needType || typed.trim() === String(n)
+
+  const submit = async () => {
+    if (!n) return
+    setSubmitting(true)
+    try {
+      const ids = rows.map((r) => r.kiro_user_id)
+      const all: DeactivateResult[] = []
+      for (let i = 0; i < ids.length; i += BATCH_LIMIT) {
+        const resp = await deactivateAccounts(ids.slice(i, i + BATCH_LIMIT), mode, recycle)
+        all.push(...resp.results)
+      }
+      const succeeded = all.filter((r) => r.success).length
+      const failed = all.length - succeeded
+      setResults(all)
+      if (failed === 0) message.success(`${recycle ? '回收' : MODE_LABEL[mode]}完成：${succeeded} 个账号`)
+      else message.warning(`完成 ${succeeded} 个，失败 ${failed} 个，详见下方`)
+      onDone()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '提交失败')
+    } finally { setSubmitting(false) }
+  }
+
+  const scope = byTeam.length === 1 ? `分组 ${byTeam[0][0]} 的 ` : byTeam.length > 1 ? `${byTeam.length} 个分组共 ` : ''
+  const actionLabel = recycle ? '回收' : MODE_LABEL[mode]
+  const confirmTitle = recycle
+    ? `确认回收${scope}${n} 个账号？退订 + 删除 IDC 用户 + 解除映射，不可恢复`
+    : mode === 'immediate'
+      ? `确认立即停用${scope}${n} 个账号？用户马上失去访问，当月仍整月计费`
+      : `确认月底停用${scope}${n} 个账号？用户保留访问到月底`
+
+  const exportResults = () => results && downloadCsv(
+    `kiro-${recycle ? 'recycle' : 'deactivate'}-${mode}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.csv`,
+    ['username', 'user_id', 'success', 'error', 'mode', 'recycle'],
+    results.map((r) => [r.username, r.user_id, r.success ? 'success' : 'failed', r.error, mode, recycle ? 'yes' : 'no']))
+  const exportList = () => downloadCsv(
+    `kiro-deactivate-list-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['username', 'feishu_name', 'role', 'team', 'tier', 'current_charges', 'credits'],
+    rows.map((r) => [r.kiro_username, r.feishu_name, r.account_role, r.team,
+      (r.live_synced ? r.live_tier : r.tier) || '', r.billing_current_charges, r.usage_credits]))
+
+  const reviewCols = [
+    { title: '用户名', dataIndex: 'kiro_username', sorter: (a: AccountRow, b: AccountRow) => a.kiro_username.localeCompare(b.kiro_username) },
+    { title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—' },
+    { title: '主/副', dataIndex: 'account_role', width: 64, render: roleTag,
+      sorter: (a: AccountRow, b: AccountRow) => a.account_role.localeCompare(b.account_role) },
+    { title: '分组', dataIndex: 'team', render: (v: string) => v || '—',
+      sorter: (a: AccountRow, b: AccountRow) => (a.team || '').localeCompare(b.team || '') },
+    { title: 'Tier', key: 'tier', render: (_: any, r: AccountRow) => (r.live_synced ? r.live_tier : r.tier) || '—' },
+    { title: '本月费用', dataIndex: 'billing_current_charges', align: 'right' as const,
+      render: (v: number | null, r: AccountRow) => fmtMoney(v, r.billing_currency),
+      sorter: (a: AccountRow, b: AccountRow) => (a.billing_current_charges ?? 0) - (b.billing_current_charges ?? 0) },
+    { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits,
+      sorter: (a: AccountRow, b: AccountRow) => (a.usage_credits ?? 0) - (b.usage_credits ?? 0) },
+    { title: '', key: 'rm', width: 56, render: (_: any, r: AccountRow) => (
+      <Button size="small" type="text" danger onClick={() => remove(r.kiro_user_id)} aria-label={`移除 ${r.kiro_username}`}>移除</Button>
+    ) },
+  ]
+
+  return (
+    <Modal
+      title={recycle ? '回收账号' : '停用 Kiro 订阅'}
+      open={open}
+      onCancel={onClose}
+      width={860}
+      footer={results ? [
+        <Button key="csv" onClick={exportResults}>导出结果 CSV</Button>,
+        <Button key="close" type="primary" onClick={onClose}>关闭</Button>,
+      ] : [
+        <Button key="cancel" onClick={onClose}>取消</Button>,
+        <Popconfirm key="ok" title={confirmTitle} onConfirm={submit} disabled={!n || !typedOk}>
+          <Button type="primary" danger={recycle || mode === 'immediate'} loading={submitting} disabled={!n || !typedOk}>
+            {recycle ? '确认回收' : '确认停用'}{n ? `（${n}）` : ''}
+          </Button>
+        </Popconfirm>,
+      ]}
+    >
+      {results ? (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Alert type={results.every((r) => r.success) ? 'success' : 'warning'} showIcon
+            message={`${actionLabel}完成：成功 ${results.filter((r) => r.success).length} / 失败 ${results.filter((r) => !r.success).length}`} />
+          <Table rowKey="user_id" dataSource={results} size="small" pagination={{ pageSize: 10 }}
+            columns={[
+              { title: '用户名', dataIndex: 'username', render: (v: string, r: DeactivateResult) => v || r.user_id },
+              { title: '结果', dataIndex: 'success', width: 80,
+                render: (ok: boolean) => ok ? <Tag color="green">成功</Tag> : <Tag color="red">失败</Tag>,
+                sorter: (a: DeactivateResult, b: DeactivateResult) => Number(a.success) - Number(b.success) },
+              { title: '说明', dataIndex: 'error', render: (e: string) => e || '—' },
+            ]} />
+        </Space>
+      ) : (
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          {summary && <Alert type="info" showIcon message={summary} />}
+
+          {/* 汇总条：不翻页就能知道范围 */}
+          <Card size="small" data-testid="deact-summary">
+            <Space wrap size={[16, 6]}>
+              <span>共 <b style={{ fontSize: 16 }}>{n}</b> 个账号</span>
+              <span>分组：{byTeam.length ? byTeam.map(([t, c]) => `${t} ${c}`).join(' · ') : '—'}</span>
+              <span>Tier：{byTier.map(([t, c]) => `${t} ${c}`).join(' · ') || '—'}</span>
+              <span style={primaryRows.length ? { color: '#cf1322', fontWeight: 600 } : undefined}>
+                主账号 {primaryRows.length}
+              </span>
+              {hasBilling && <span>本月订阅费合计 <b>${subsTotal.toFixed(2)}</b></span>}
+              <Typography.Link onClick={exportList} style={{ fontSize: 12 }}>导出名单</Typography.Link>
+            </Space>
+          </Card>
+          {primaryRows.length > 0 && (
+            <Alert type="error" showIcon
+              message={<span>名单里有 <b>{primaryRows.length}</b> 个主账号</span>}
+              description="主账号是用户的永久账号，预设默认不选主账号。请在下方用「仅看主账号」核对，误选的点「移除」。" />
+          )}
+
+          {/* 核对名单：分页 + 排序 + 过滤 + 逐行移除；要加人请关掉弹窗回明细表勾选 */}
+          <div>
+            <Space style={{ marginBottom: 8 }} wrap>
+              <Input.Search allowClear placeholder="按用户名 / 飞书用户 / 分组过滤" style={{ width: 280 }}
+                value={kw} onChange={(e) => setKw(e.target.value)} />
+              <Checkbox checked={primaryOnly} onChange={(e) => setPrimaryOnly(e.target.checked)}>仅看主账号</Checkbox>
+              <span style={{ fontSize: 12, color: '#888' }}>显示 {shown.length} / {n}；要补选请关闭弹窗回明细表勾选</span>
+            </Space>
+            <Table rowKey="kiro_user_id" dataSource={shown} columns={reviewCols} size="small"
+              pagination={{ pageSize: 10, size: 'small', showTotal: (t) => `共 ${t} 行` }}
+              locale={{ emptyText: n ? '无匹配' : '名单为空' }} />
+          </div>
+
+          <div>
+            <div style={{ marginBottom: 6 }}>停用时机</div>
+            <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} style={{ width: '100%' }}>
+              <Space direction="vertical" size={8}>
+                <Radio value="end_of_period">
+                  <b>月底停用（End of the month）</b>
+                  <div style={{ color: '#888', fontSize: 12 }}>
+                    用户保留 Kiro 访问到本月底，订阅在此期间显示 CANCELLED；月底前重新订阅可撤销停用。
+                  </div>
+                </Radio>
+                <Radio value="immediate">
+                  <b>立即停用（Immediately）</b>
+                  <div style={{ color: '#888', fontSize: 12 }}>
+                    用户立刻失去 Kiro 全部功能的访问。<b>当月费用仍整月计收，不会按比例退费</b>；适合离职、安全事件等需要马上断权限的场景。
+                  </div>
+                </Radio>
+              </Space>
+            </Radio.Group>
+          </div>
+
+          <Checkbox checked={recycle} onChange={(e) => setRecycle(e.target.checked)}>
+            同时删除 IDC 用户并解除飞书映射（回收账号，<b>不可恢复</b>）
+          </Checkbox>
+          {recycle && (
+            <Alert type="error" showIcon message="回收会删除 IAM Identity Center 用户"
+              description="用户的登录身份随即消失，无法再登录 Kiro；通常只对低用量副账号执行。建议选「立即停用」，月底停用对已删除的用户没有意义。" />
+          )}
+          {!recycle && mode === 'immediate' && (
+            <Alert type="warning" showIcon message="立即停用不省当月费用"
+              description="AWS 口径：Immediately 只是立刻切断访问，账单仍收到账期结束。若目的是省钱，选「月底停用」即可。" />
+          )}
+
+          {needType && (
+            <Alert type="warning" showIcon
+              message={<Space>
+                <span>名单较多（{n} 个）。请输入账号数 <b>{n}</b> 以启用确认按钮：</span>
+                <Input size="small" style={{ width: 90 }} value={typed} onChange={(e) => setTyped(e.target.value)}
+                  placeholder={String(n)} data-testid="confirm-count" status={typed && !typedOk ? 'error' : undefined} />
+              </Space>} />
+          )}
+        </Space>
+      )}
+    </Modal>
+  )
+}
+
 function AccountsPanel() {
   const [rows, setRows] = useState<AccountRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -131,6 +439,33 @@ function AccountsPanel() {
   const [capModalOpen, setCapModalOpen] = useState(false)
   const [capTarget, setCapTarget] = useState<number | null>(null)
   const [capSubmitting, setCapSubmitting] = useState(false)
+  const [deactOpen, setDeactOpen] = useState(false)
+  const [deactTargets, setDeactTargets] = useState<AccountRow[]>([])
+  const [historyRow, setHistoryRow] = useState<AccountRow | null>(null)
+  const [deactSummary, setDeactSummary] = useState<string | undefined>(undefined)
+  // 明细视图：筛选 + 勾选
+  const [view, setView] = useState<'person' | 'flat'>('person')
+  const [fTeams, setFTeams] = useState<string[]>([])
+  const [fTiers, setFTiers] = useState<string[]>([])
+  const [fRole, setFRole] = useState<string | undefined>(undefined)
+  const [fStatus, setFStatus] = useState<string | undefined>(undefined)
+  const [fCreditsLt, setFCreditsLt] = useState<number | null>(null)     // null = 不限
+  const [fInactiveDays, setFInactiveDays] = useState<number | null>(null)
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([])
+
+  const openDeactivate = (targets: AccountRow[], summary?: string) => {
+    setDeactTargets(targets); setDeactSummary(summary); setDeactOpen(true)
+  }
+  const doReactivate = async (r: AccountRow) => {
+    try {
+      const resp = await reactivateAccounts([r.kiro_user_id])
+      const one = resp.results[0]
+      if (one?.success) message.success(`已恢复 ${r.kiro_username} 的订阅（回到 PENDING，用户登录后激活）`)
+      else message.error(one?.error || '恢复失败')
+      load(true)
+    } catch (e: any) { message.error(e.response?.data?.detail || '恢复失败') }
+  }
+  const deactCandidates = rows.filter(hasLiveSubscription)
 
   const loadCap = async () => {
     // cap 独立加载，失败不影响账号列表（后端已降级，这里再兜一层）
@@ -170,6 +505,11 @@ function AccountsPanel() {
   const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length
   // Overages 上限是 profile 级单一值（USD/订阅）；最坏敞口 = 账号数 × 上限
   const worstOverage = cap != null ? totalAccounts * cap.value : null
+  // 本月预估账单 = Σ 本周期订阅费 + Σ 超额费用（计费口径，直读订阅计费服务）
+  const billingRows = rows.filter((r) => r.billing_synced)
+  const billSubs = billingRows.reduce((s, r) => s + (r.billing_current_charges ?? 0), 0)
+  const billOver = billingRows.reduce((s, r) => s + (r.billing_overage_charges ?? 0), 0)
+  const billMissing = rows.length - billingRows.length
 
   // ── 图表数据 ──
   const topByCredits = people.filter((p) => p.credits > 0)
@@ -182,6 +522,48 @@ function AccountsPanel() {
     }
     return [...m.entries()].map(([label, value]) => ({ label, value }))
   })()
+
+  // ── 明细视图：筛选 ──
+  const effTier = (r: AccountRow) => (r.live_synced ? (r.live_tier || '') : (r.tier || ''))
+  const effStatus = (r: AccountRow) => (r.live_synced ? (r.live_status || 'NONE') : (r.status === 'active' ? 'ACTIVE' : 'NONE'))
+  const daysSince = (d: string | null) => d ? Math.floor((Date.now() - new Date(d).getTime()) / 86400000) : Infinity
+  const allTeams = [...new Set(rows.map((r) => r.team).filter(Boolean))].sort()
+  const allTiers = [...new Set(rows.map(effTier).filter(Boolean))].sort()
+  const filtered = rows.filter((r) =>
+    (!fTeams.length || fTeams.includes(r.team)) &&
+    (!fTiers.length || fTiers.includes(effTier(r))) &&
+    (!fRole || r.account_role === fRole) &&
+    (!fStatus || effStatus(r) === fStatus) &&
+    (fCreditsLt == null || (r.usage_credits ?? 0) < fCreditsLt) &&
+    (fInactiveDays == null || daysSince(r.usage_last_active) >= fInactiveDays))
+  const filterDesc = [
+    fTeams.length ? `分组 ${fTeams.join('/')}` : '',
+    fTiers.length ? `Tier ${fTiers.join('/')}` : '',
+    fRole ? (fRole === 'primary' ? '主账号' : '副账号') : '',
+    fStatus ? `状态 ${fStatus}` : '',
+    fCreditsLt != null ? `Credits < ${fCreditsLt}` : '',
+    fInactiveDays != null ? `${fInactiveDays} 天未活跃` : '',
+  ].filter(Boolean).join(' · ')
+  const resetFilters = () => { setFTeams([]); setFTiers([]); setFRole(undefined); setFStatus(undefined); setFCreditsLt(null); setFInactiveDays(null) }
+  // 预设只选副账号 + 有有效订阅（主账号须手动勾选，弹窗红字提示）
+  const selectSecondaryOf = (list: AccountRow[]) =>
+    setSelectedKeys(list.filter((r) => r.account_role === 'secondary' && hasLiveSubscription(r)).map((r) => r.kiro_user_id))
+  const presetLowUsage = () => {
+    setFRole('secondary'); setFCreditsLt(fCreditsLt ?? 50)
+    const th = fCreditsLt ?? 50
+    selectSecondaryOf(rows.filter((r) =>
+      (!fTeams.length || fTeams.includes(r.team)) && (r.usage_credits ?? 0) < th))
+  }
+  const presetWholeTeam = () => {
+    if (!fTeams.length) { message.info('先在「分组」里选择一个或多个组'); return }
+    selectSecondaryOf(filtered)
+  }
+  const selectedRows = rows.filter((r) => selectedKeys.includes(r.kiro_user_id))
+  const selectedPrimary = selectedRows.filter((r) => r.account_role === 'primary').length
+  const openBatchFromSelection = () => {
+    openDeactivate(selectedRows.filter(hasLiveSubscription),
+      `来自明细视图勾选：${selectedRows.length} 个账号${filterDesc ? `（筛选：${filterDesc}）` : ''}`)
+  }
 
   // ── 子账号明细（展开）──
   // Tier/状态优先展示订阅实况（控制台直接退订/改套餐不回写映射表，快照会滞后）
@@ -199,10 +581,44 @@ function AccountsPanel() {
       if (!s) return <Tag color="red">无订阅</Tag>
       return <Tag color={s === 'ACTIVE' ? 'green' : s === 'PENDING' ? 'orange' : 'default'}>{s}</Tag>
     } },
+    { title: '本月费用', dataIndex: 'billing_current_charges', align: 'right' as const,
+      render: (v: number | null, r: AccountRow) => (
+        <span title={r.billing_synced ? `套餐 ${planLabel(r.billing_plan_code)}${r.billing_plan_start ? ` · 自 ${r.billing_plan_start}` : ''}` : r.billing_error}>
+          {fmtMoney(v, r.billing_currency)}
+          {r.billing_pending_plan && <Tag color="orange" style={{ marginLeft: 4, fontSize: 11 }}>→ {planLabel(r.billing_pending_plan)}</Tag>}
+          {r.billing_account_status && r.billing_account_status !== 'ACTIVE' && <Tag color="red" style={{ marginLeft: 4, fontSize: 11 }}>{r.billing_account_status}</Tag>}
+        </span>
+      ) },
+    { title: '额度用量', key: 'billing_credit', align: 'right' as const,
+      render: (_: any, r: AccountRow) => {
+        if (r.billing_credit_limit == null) return <span style={{ color: '#ccc' }}>—</span>
+        const used = r.billing_credit_used ?? 0
+        const pct = r.billing_credit_limit > 0 ? used / r.billing_credit_limit : 0
+        const color = pct >= 1 ? '#cf1322' : pct >= 0.8 ? '#d46b08' : undefined
+        return <span style={{ color }}>{used.toLocaleString()} / {r.billing_credit_limit.toLocaleString()}</span>
+      } },
+    { title: '超额', dataIndex: 'billing_overage_charges', align: 'right' as const,
+      render: (v: number | null, r: AccountRow) => (
+        <span style={{ color: v ? '#cf1322' : undefined }}>{fmtMoney(v, r.billing_currency)}</span>
+      ) },
     { title: 'Credits', dataIndex: 'usage_credits', align: 'right' as const, render: fmtCredits },
     { title: '消息数', dataIndex: 'usage_messages', align: 'right' as const, render: fmtNum },
     { title: '最后活跃', dataIndex: 'usage_last_active',
       render: (v: string | null) => v || <span style={{ color: '#ccc' }}>—</span> },
+    { title: '操作', key: 'ops', render: (_: any, r: AccountRow) => (
+      <Space size={4}>
+      <Button size="small" onClick={() => setHistoryRow(r)}>账单</Button>
+      {r.live_synced && r.live_status === 'CANCELLED' ? (
+        <Popconfirm title={`恢复 ${r.kiro_username} 的订阅（按原套餐重新订阅，撤销停用）？`}
+          onConfirm={() => doReactivate(r)}>
+          <Button size="small" type="primary" ghost>恢复</Button>
+        </Popconfirm>
+      ) : (
+        <Button size="small" danger disabled={!hasLiveSubscription(r)}
+          onClick={() => openDeactivate([r])}>停用</Button>
+      )}
+      </Space>
+    ) },
   ]
 
   // ── 按人聚合主表 ──
@@ -221,15 +637,32 @@ function AccountsPanel() {
       render: (v: string) => v || <span style={{ color: '#ccc' }}>—</span> },
   ]
 
+  // ── 明细视图列 = 飞书用户 + 子账号列 ──
+  const flatCols = [
+    { title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—' },
+    ...subCols,
+  ]
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       {/* 指标卡 */}
       <Row gutter={16}>
-        <Col span={4}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
-        <Col span={4}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
-        <Col span={5}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
-        <Col span={4}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
-        <Col span={7}>
+        <Col span={3}><Card size="small"><Statistic title="飞书用户数" value={totalPeople} /></Card></Col>
+        <Col span={3}><Card size="small"><Statistic title="账号总数" value={totalAccounts} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="总 Credits" value={totalCredits} precision={1} /></Card></Col>
+        <Col span={3}><Card size="small"><Statistic title="有用量的人" value={activePeople} suffix={`/ ${totalPeople}`} /></Card></Col>
+        <Col span={5}>
+          <Card size="small">
+            <Statistic title="本月预估账单" prefix="$" value={billingRows.length ? billSubs + billOver : '—'} precision={2}
+              valueStyle={billingRows.length ? undefined : { color: '#ccc' }} />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {billingRows.length
+                ? <>订阅 ${billSubs.toFixed(2)} + 超额 ${billOver.toFixed(2)}{billMissing > 0 && <>；{billMissing} 个账号无计费数据</>}</>
+                : '计费服务暂不可用'}
+            </Typography.Text>
+          </Card>
+        </Col>
+        <Col span={6}>
           <Card size="small">
             <Statistic
               title={
@@ -319,28 +752,110 @@ function AccountsPanel() {
       </Row>
 
       {/* 按人聚合表（可展开下钻子账号） */}
-      <Card size="small" title="按飞书用户聚合（展开看名下各账号）"
-        extra={<Button size="small" loading={loading} onClick={() => load(true)}>刷新</Button>}>
+      <DeactivateModal open={deactOpen} targets={deactTargets} summary={deactSummary}
+        onClose={() => setDeactOpen(false)} onDone={() => { setSelectedKeys([]); load(true) }} />
+      <BillingHistoryModal row={historyRow} onClose={() => setHistoryRow(null)} />
+
+      <Card size="small"
+        title={
+          <Space size={12}>
+            <Segmented size="small" value={view} onChange={(v) => setView(v as 'person' | 'flat')}
+              options={[{ label: '按人聚合', value: 'person' }, { label: '账号明细（筛选 / 勾选）', value: 'flat' }]} />
+            <span style={{ fontWeight: 400, fontSize: 12, color: '#888' }}>
+              {view === 'person' ? '展开看名下各账号' : '按分组 / Tier / 用量筛选，勾选后批量停用'}
+            </span>
+          </Space>
+        }
+        extra={
+          <Space size={8}>
+            {view === 'person' && (
+              <Button size="small" danger disabled={!deactCandidates.length}
+                onClick={() => { setView('flat'); message.info('批量操作请在「账号明细」里筛选并勾选账号') }}>
+                批量停用 / 回收
+              </Button>
+            )}
+            <Button size="small" loading={loading} onClick={() => load(true)}>刷新</Button>
+          </Space>
+        }>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
           一人多账号已合并为一行，Credits/消息为名下所有账号汇总；点行首 ▸ 展开看每个子账号。
           Tier/订阅状态为 AWS 实时数据（控制台的退订/改套餐也会反映）；
           用量来自 Kiro Analytics（Athena，约每日更新），点「刷新」强制重查。— 表示暂无数据。
+          「本月费用 / 额度用量 / 超额」直读 Kiro 订阅计费服务（计费口径，实时），Credits/消息数来自 Athena（活动口径），两者时效可能不同；点「账单」可按月回溯。
+          子账号行的「停用」= 控制台 Deactivate Kiro plan（可选月底 / 立即），已停用（CANCELLED）的行显示「恢复」可撤销；「批量停用 / 回收」可一次处理多个低用量副账号。
         </Typography.Paragraph>
-        <Table
-          rowKey="feishu_open_id"
-          dataSource={people}
-          columns={personCols}
-          loading={loading}
-          size="small"
-          pagination={{ pageSize: 15 }}
-          expandable={{
-            expandedRowRender: (p: PersonRow) => (
-              <Table rowKey="kiro_user_id" dataSource={p.accounts} columns={subCols}
-                size="small" pagination={false} />
-            ),
-            rowExpandable: (p: PersonRow) => p.accounts.length > 0,
-          }}
-        />
+        {view === 'person' ? (
+          <Table
+            rowKey="feishu_open_id"
+            dataSource={people}
+            columns={personCols}
+            loading={loading}
+            size="small"
+            pagination={{ pageSize: 15 }}
+            expandable={{
+              expandedRowRender: (p: PersonRow) => (
+                <Table rowKey="kiro_user_id" dataSource={p.accounts} columns={subCols}
+                  size="small" pagination={false} />
+              ),
+              rowExpandable: (p: PersonRow) => p.accounts.length > 0,
+            }}
+          />
+        ) : (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            {/* 筛选栏 */}
+            <Space wrap size={8} data-testid="flat-filters">
+              <Select mode="multiple" allowClear placeholder="分组" style={{ minWidth: 180 }} value={fTeams}
+                onChange={setFTeams} options={allTeams.map((t) => ({ value: t, label: t }))} maxTagCount="responsive" />
+              <Select mode="multiple" allowClear placeholder="Tier" style={{ minWidth: 150 }} value={fTiers}
+                onChange={setFTiers} options={allTiers.map((t) => ({ value: t, label: t }))} maxTagCount="responsive" />
+              <Select allowClear placeholder="主/副" style={{ width: 100 }} value={fRole} onChange={setFRole}
+                options={[{ value: 'primary', label: '主账号' }, { value: 'secondary', label: '副账号' }]} />
+              <Select allowClear placeholder="订阅状态" style={{ width: 130 }} value={fStatus} onChange={setFStatus}
+                options={[{ value: 'ACTIVE', label: 'ACTIVE' }, { value: 'PENDING', label: 'PENDING' },
+                          { value: 'CANCELLED', label: 'CANCELLED' }, { value: 'NONE', label: '无订阅' }]} />
+              <InputNumber placeholder="不限" style={{ width: 170 }} min={0} value={fCreditsLt}
+                onChange={(v) => setFCreditsLt(v)} addonBefore="Credits <" />
+              <InputNumber placeholder="天" style={{ width: 150 }} min={1} value={fInactiveDays}
+                onChange={(v) => setFInactiveDays(v)} addonBefore="未活跃 ≥" addonAfter="天" />
+              <Button size="small" onClick={resetFilters}>清除筛选</Button>
+              <span style={{ color: '#888', fontSize: 12 }}>匹配 {filtered.length} / {rows.length}</span>
+            </Space>
+            {/* 预设 */}
+            <Space size={8}>
+              <span style={{ fontSize: 12, color: '#888' }}>快速选择：</span>
+              <Button size="small" onClick={presetLowUsage}>低用量副账号（Credits &lt; {fCreditsLt ?? 50}）</Button>
+              <Button size="small" onClick={presetWholeTeam} disabled={!fTeams.length}>选中本组全部副账号</Button>
+              <Button size="small" onClick={() => selectSecondaryOf(filtered)}>选中当前匹配的副账号</Button>
+              <span style={{ fontSize: 12, color: '#888' }}>预设只选副账号；主账号需手动勾选。</span>
+            </Space>
+            <Table
+              rowKey="kiro_user_id"
+              dataSource={filtered}
+              columns={flatCols}
+              loading={loading}
+              size="small"
+              pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个账号` }}
+              rowSelection={{
+                selectedRowKeys: selectedKeys,
+                onChange: (keys) => setSelectedKeys(keys as string[]),
+                preserveSelectedRowKeys: true,
+                getCheckboxProps: (r: AccountRow) => ({ disabled: !hasLiveSubscription(r) }),
+              }}
+            />
+            {/* 批量操作条 */}
+            {selectedKeys.length > 0 && (
+              <Alert type={selectedPrimary > 0 ? 'error' : 'warning'} showIcon
+                message={
+                  <Space size={12}>
+                    <span>已选 <b>{selectedKeys.length}</b> 个账号</span>
+                    {selectedPrimary > 0 && <span style={{ color: '#cf1322' }}>其中 <b>{selectedPrimary}</b> 个主账号</span>}
+                    <Button size="small" type="primary" danger onClick={openBatchFromSelection}>批量停用 / 回收</Button>
+                    <Button size="small" onClick={() => setSelectedKeys([])}>清空选择</Button>
+                  </Space>
+                } />
+            )}
+          </Space>
+        )}
       </Card>
     </Space>
   )

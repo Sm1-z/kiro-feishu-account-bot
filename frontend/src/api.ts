@@ -94,7 +94,35 @@ export interface AccountRow {
   usage_conversations: number | null
   usage_last_active: string | null
   usage_active_days: number | null
+  // 费用/额度（计费口径，直读订阅计费服务；null = 查询失败或无订阅记录）
+  billing_synced: boolean
+  billing_error: string
+  billing_plan_code: string | null
+  billing_plan_start: string | null
+  billing_current_charges: number | null
+  billing_currency: string
+  billing_account_status: string | null
+  billing_pending_plan: string | null
+  billing_pending_scheduled: string | null
+  billing_credit_used: number | null
+  billing_credit_limit: number | null
+  billing_overage_charges: number | null
+  billing_overage_rate: number | null
 }
+export interface BillingHistory {
+  user_id: string
+  year: number
+  month: number
+  credit_used: number | null
+  credit_limit: number | null
+  credit_unit: string | null
+  overage_charges: number | null
+  overage_rate: number | null
+  has_usage_entry: boolean
+}
+export const getBillingHistory = (kiro_user_id: string, year: number, month: number) =>
+  api.get<BillingHistory>(`/api/admin/accounts/${kiro_user_id}/billing-history`, { params: { year, month } })
+    .then((r) => r.data)
 export const getAccounts = (force = false) =>
   api.get<AccountRow[]>('/api/admin/accounts', { params: force ? { force: true } : {} })
     .then((r) => r.data)
@@ -121,6 +149,29 @@ export const raiseOverageCap = (desired_value: number) =>
   api.post('/api/admin/overage-cap', { desired_value })
 export const createGroup = (group_name: string) =>
   api.post('/api/admin/groups', { group_name })
+
+// 停用 / 回收（对应 Kiro 控制台「Deactivate Kiro plan」的两个选项）
+export type DeletionMode = 'end_of_period' | 'immediate'
+export interface DeactivateResult {
+  user_id: string
+  username: string
+  success: boolean
+  error: string
+}
+export interface DeactivateResponse {
+  mode: DeletionMode
+  recycle: boolean
+  results: DeactivateResult[]
+  succeeded: number
+  failed: number
+}
+export const deactivateAccounts = (kiro_user_ids: string[], mode: DeletionMode, recycle = false) =>
+  api.post<DeactivateResponse>('/api/admin/accounts/deactivate', { kiro_user_ids, mode, recycle })
+    .then((r) => r.data)
+// 恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐重新订阅
+export const reactivateAccounts = (kiro_user_ids: string[]) =>
+  api.post<DeactivateResponse>('/api/admin/accounts/reactivate', { kiro_user_ids })
+    .then((r) => r.data)
 
 export interface UnlinkedAccount {
   kiro_user_id: string

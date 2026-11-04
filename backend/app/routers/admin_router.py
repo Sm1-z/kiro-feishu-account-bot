@@ -16,7 +16,9 @@ from app.auth import CurrentUser, require_admin
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import RequestStore
-from app.schemas import GroupIn, ImportLinkIn, ManualLinkIn, OverageCapIn, ReviewIn
+from app.schemas import (
+    DeactivateIn, GroupIn, ImportLinkIn, ManualLinkIn, OverageCapIn, ReactivateIn, ReviewIn,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -78,8 +80,11 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
       前端以 live 为准展示、快照留作对照。实况拉取失败时 live_synced=False 降级。
     - 用量关联键 = kiro_user_id = Athena 表 userid，应用层拼接；
       Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
-    - force=true 时绕过用量 TTL 缓存强制重查（刷新按钮用）。
+    - 费用/额度（billing_* 字段）直读订阅计费服务，按用户查询（Kiro Enterprise）：本周期已产生费用、
+      月额度与当前用量、超额费用；失败时 billing_synced=False、字段 None，不阻断列表。
+    - force=true 时绕过用量/费用 TTL 缓存强制重查（刷新按钮用）。
     """
+    from app.billing import get_billing_by_user
     from app.provisioner import live_subscription_map
     from app.usage import get_usage_by_user
 
@@ -99,11 +104,14 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
         live, live_synced = {}, False
 
     usage = get_usage_by_user(force=force)  # {userid: {...}}，失败返回 {}
+    user_ids = [it.get("kiro_user_id", "") for it in items]
+    billing = get_billing_by_user(user_ids, force=force)  # {userid: {...}}，失败返回 {}
     out = []
     for it in items:
         uid = it.get("kiro_user_id", "")
         u = usage.get(uid)
         lv = live.get(uid)
+        b = billing.get(uid)
         out.append({
             "kiro_user_id": uid,
             "feishu_open_id": it.get("feishu_open_id", ""),
@@ -124,8 +132,40 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
             "usage_conversations": u["conversations"] if u else None,
             "usage_last_active": u["last_active"] if u else None,
             "usage_active_days": u["active_days"] if u else None,
+            # 费用/额度（计费口径，None = 查询失败或无订阅记录）
+            "billing_synced": bool(b and b.get("billing_synced")),
+            "billing_error": (b or {}).get("billing_error", "") if b else "unavailable",
+            "billing_plan_code": (b or {}).get("plan_code"),
+            "billing_plan_start": (b or {}).get("plan_start"),
+            "billing_current_charges": (b or {}).get("current_charges"),
+            "billing_currency": (b or {}).get("currency", "USD"),
+            "billing_account_status": (b or {}).get("account_status"),
+            "billing_pending_plan": (b or {}).get("pending_plan"),
+            "billing_pending_scheduled": (b or {}).get("pending_scheduled"),
+            "billing_credit_used": (b or {}).get("credit_used"),
+            "billing_credit_limit": (b or {}).get("credit_limit"),
+            "billing_overage_charges": (b or {}).get("overage_charges"),
+            "billing_overage_rate": (b or {}).get("overage_rate"),
         })
     return out
+
+
+@router.get("/accounts/{kiro_user_id}/billing-history")
+def billing_history(kiro_user_id: str, year: int, month: int,
+                    _: CurrentUser = Depends(require_admin)):
+    """某账号某月的额度/用量/超额（历史回溯，出账对账 / 计费争议用）。
+
+    订阅计费服务要求时间窗 endTime = 月末 23:59:59 UTC，由 billing.month_range 保证。
+    无该月数据时 has_usage_entry=False、数值字段 None。
+    """
+    from app.billing import get_user_month_usage
+
+    if not (2024 <= year <= 2100) or not (1 <= month <= 12):
+        raise HTTPException(400, "year/month 不合法")
+    try:
+        return get_user_month_usage(kiro_user_id, year, month)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"查询失败: {exc}")
 
 
 @router.get("/overage-cap")
@@ -163,6 +203,77 @@ def raise_overage_cap(body: OverageCapIn, admin: CurrentUser = Depends(require_a
         result={"status": result["status"], "request_id": result["request_id"]},
     ))
     return result
+
+
+@router.post("/accounts/deactivate")
+def deactivate_accounts(body: DeactivateIn, admin: CurrentUser = Depends(require_admin)):
+    """停用 / 回收账号（即时执行，管理员动作，逐账号落 requests 表审计）。
+
+    对应 Kiro 控制台「Deactivate Kiro plan」：
+    - mode=end_of_period（默认）：访问与计费都到月底结束，期间订阅实况为 CANCELLED；
+    - mode=immediate：立即切断访问，**当月仍整月计费**（不省钱），适合离职/安全事件。
+    recycle=True 时额外删 IDC 用户 + 解除映射（副账号回收，不可逆）。
+    返回逐账号结果；部分失败时整体 HTTP 200，由前端按行展示 error。
+    """
+    from app import request_store as RS
+    from app.provisioner import bulk_cancel, deactivate
+
+    store = MappingStore()
+    name_of = {}
+    for uid in body.kiro_user_ids:
+        m = store.get(uid)
+        name_of[uid] = m.kiro_username if m else ""
+
+    if body.recycle:
+        results = bulk_cancel(body.kiro_user_ids, body.mode)
+        rtype = RS.RECYCLE
+    else:
+        results = deactivate(body.kiro_user_ids, body.mode)
+        rtype = RS.DEACTIVATE
+
+    # 审计：谁、何时、对哪个账号、哪种方式、结果。执行已完成，直接落 executed/failed。
+    rs = RS.RequestStore()
+    for r in results:
+        rs.create(RS.Request(
+            user_open_id=admin.open_id, user_name=admin.name, type=rtype,
+            status=RS.EXECUTED if r["success"] else RS.FAILED,
+            reviewer_open_id=admin.open_id, kiro_user_id=r["user_id"],
+            payload={"mode": body.mode, "username": name_of.get(r["user_id"], "")},
+            result={"error": r["error"]} if r["error"] else {"ok": True},
+        ))
+    for r in results:
+        r["username"] = name_of.get(r["user_id"], "")
+    return {"mode": body.mode, "recycle": body.recycle, "results": results,
+            "succeeded": sum(1 for r in results if r["success"]),
+            "failed": sum(1 for r in results if not r["success"])}
+
+
+@router.post("/accounts/reactivate")
+def reactivate_accounts(body: ReactivateIn, admin: CurrentUser = Depends(require_admin)):
+    """恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐重新订阅，逐账号审计。
+
+    对应控制台停用成功提示里的 "You can cancel this removal by resubscribing them
+    before the end of the month"。实测两种停用方式后同月都可重订，订阅回到 PENDING。
+    """
+    from app import request_store as RS
+    from app.provisioner import reactivate
+
+    store = MappingStore()
+    name_of = {uid: (store.get(uid).kiro_username if store.get(uid) else "") for uid in body.kiro_user_ids}
+    results = reactivate(body.kiro_user_ids)
+    rs = RS.RequestStore()
+    for r in results:
+        rs.create(RS.Request(
+            user_open_id=admin.open_id, user_name=admin.name, type=RS.REACTIVATE,
+            status=RS.EXECUTED if r["success"] else RS.FAILED,
+            reviewer_open_id=admin.open_id, kiro_user_id=r["user_id"],
+            payload={"username": name_of.get(r["user_id"], ""), "tier": r.get("tier", "")},
+            result={"error": r["error"]} if r["error"] else {"ok": True},
+        ))
+        r["username"] = name_of.get(r["user_id"], "")
+    return {"results": results,
+            "succeeded": sum(1 for r in results if r["success"]),
+            "failed": sum(1 for r in results if not r["success"])}
 
 
 @router.post("/groups")

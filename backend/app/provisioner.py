@@ -147,13 +147,31 @@ def _update_assignment(user_id: str, sub_type: str, credentials, region: str) ->
         raise RuntimeError(f"UpdateAssignment failed: HTTP {exc.code}: {body}") from exc
 
 
-def _delete_assignment(user_id: str, credentials, region: str) -> None:
-    """取消订阅。ResourceNotFound=已无订阅(幂等)。"""
+# 停用（DeleteAssignment）的生效时机，对应 Kiro 控制台「Deactivate Kiro plan」的两个选项。
+#   end_of_period → END_OF_PERIOD：访问与计费都到当前账期末（月底）结束；订阅在此期间显示 CANCELLED。
+#   immediate     → IMMEDIATE：立即切断访问；**计费仍收到账期末**（不省当月费用），适合离职/安全事件。
+# 服务端默认 END_OF_PERIOD；未知字段会被服务端静默忽略，所以枚举值必须准确。
+DELETION_MODES = {"end_of_period": "END_OF_PERIOD", "immediate": "IMMEDIATE"}
+DEFAULT_DELETION_MODE = "end_of_period"
+
+
+def _deletion_mode_value(mode: str | None) -> str:
+    key = (mode or DEFAULT_DELETION_MODE).strip().lower()
+    if key not in DELETION_MODES:
+        raise ValueError(f"无效停用方式: {mode}（可选 end_of_period / immediate）")
+    return DELETION_MODES[key]
+
+
+def _delete_assignment(user_id: str, credentials, region: str,
+                       mode: str = DEFAULT_DELETION_MODE) -> None:
+    """取消订阅。ResourceNotFound=已无订阅(幂等)。mode 见 DELETION_MODES。"""
+    payload = {"principalId": user_id, "principalType": "USER",
+               "deletionMode": _deletion_mode_value(mode)}
     try:
         _signed_post(
             f"https://codewhisperer.{region}.amazonaws.com/",
             "AmazonQDeveloperService.DeleteAssignment", "q", region,
-            {"principalId": user_id, "principalType": "USER"}, credentials,
+            payload, credentials,
         )
     except urllib.error.HTTPError as exc:
         body = exc.read().decode()
@@ -313,10 +331,11 @@ def upgrade(username: str, tier: str) -> SimpleResult:
         if live_status is None or live_status == "CANCELLED":
             created = _create_assignment(user_id, sub_type, creds, region)
             if not created:
-                # Conflict = 已取消订阅仍占位（账期到月底），服务端拒绝重订
+                # 2026-11 实测：月底停用 / 立即停用后的 CANCELLED 订阅同月可直接重订（回到 PENDING），
+                # Conflict 不再是常态；仍被拒时多为原订阅账期状态冲突，给可读提示而非假 executed。
                 return SimpleResult(success=False, error=(
-                    "重新订阅未生效：原订阅已取消但账期未结（保留到月底）。"
-                    "请月初重试，或联系管理员在 Kiro 控制台处理。"))
+                    "重新订阅被服务端拒绝（Conflict）：原订阅账期状态冲突。"
+                    "请稍后重试，或联系管理员在 Kiro 控制台处理。"))
             _invalidate_live_cache()
             return SimpleResult(success=True)
 
@@ -327,14 +346,15 @@ def upgrade(username: str, tier: str) -> SimpleResult:
         return SimpleResult(success=False, error=str(exc))
 
 
-def cancel(username: str) -> SimpleResult:
+def cancel(username: str, mode: str = DEFAULT_DELETION_MODE) -> SimpleResult:
     region = settings.aws_region
     try:
         session = get_session()
         id_store = get_identity_store_id(session)
         idc = session.client("identitystore", region_name=region)
         user_id = _get_user_id_by_name(idc, id_store, username)
-        _delete_assignment(user_id, get_frozen_credentials(), region)
+        _delete_assignment(user_id, get_frozen_credentials(), region, mode)
+        _invalidate_live_cache()
         return SimpleResult(success=True)
     except Exception as exc:
         return SimpleResult(success=False, error=str(exc))
@@ -414,12 +434,80 @@ def bulk_update_tier(user_ids: list[str], tier: str) -> list[dict]:
         return list(ex.map(_do, user_ids))
 
 
-def bulk_cancel(user_ids: list[str]) -> list[dict]:
+def deactivate(user_ids: list[str], mode: str = DEFAULT_DELETION_MODE) -> list[dict]:
+    """批量停用订阅（只退订，保留 IDC 用户与映射）= 控制台「Deactivate Kiro plan」。
+
+    映射表 status 同步写 cancelled 作快照；展示仍以订阅实况为准
+    （END_OF_PERIOD 期间实况为 CANCELLED，IMMEDIATE 后订阅直接消失）。
+    ResourceNotFound 视为成功（幂等）。
+    """
+    from app.mapping_store import CANCELLED, MappingStore
+
+    region = settings.aws_region
+    creds = get_frozen_credentials()
+    mapping = MappingStore()
+    results = []
+    for uid in user_ids:
+        try:
+            _delete_assignment(uid, creds, region, mode)
+            try:
+                mapping.update_fields(uid, status=CANCELLED)
+            except Exception:
+                logger.warning("deactivate: mapping snapshot update failed for %s", uid)
+            results.append({"user_id": uid, "success": True, "error": ""})
+        except Exception as exc:
+            results.append({"user_id": uid, "success": False, "error": str(exc)})
+    _invalidate_live_cache()
+    return results
+
+
+def reactivate(user_ids: list[str]) -> list[dict]:
+    """恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐 CreateAssignment。
+
+    套餐来源：订阅实况 tier（CANCELLED 记录仍带原套餐）→ 映射表 tier 快照 → 都没有则失败。
+    2026-11 实测：END_OF_PERIOD / IMMEDIATE 停用后同月重订均成功，订阅回到 PENDING。
+    ConflictException（_create_assignment 返回 False）按失败上报。
+    """
+    from app.mapping_store import ACTIVE, MappingStore
+
+    region = settings.aws_region
+    creds = get_frozen_credentials()
+    mapping = MappingStore()
+    try:
+        live = live_subscription_map(force=True)
+    except Exception:
+        live = {}
+    results = []
+    for uid in user_ids:
+        try:
+            tier_key = (live.get(uid) or {}).get("tier") or ""
+            if not tier_key:
+                m = mapping.get(uid)
+                tier_key = (m.tier if m else "") or ""
+            sub_type = TIER_MAP.get(tier_key.strip().lower())
+            if not sub_type:
+                raise RuntimeError(f"无法确定原套餐（实况/映射均无 tier），请改走「升级」指定套餐")
+            created = _create_assignment(uid, sub_type, creds, region)
+            if not created:
+                raise RuntimeError("重新订阅被服务端拒绝（Conflict），请稍后重试或在 Kiro 控制台处理")
+            try:
+                mapping.update_fields(uid, status=ACTIVE, tier=tier_key)
+            except Exception:
+                logger.warning("reactivate: mapping snapshot update failed for %s", uid)
+            results.append({"user_id": uid, "success": True, "error": "", "tier": tier_key})
+        except Exception as exc:
+            results.append({"user_id": uid, "success": False, "error": str(exc), "tier": ""})
+    _invalidate_live_cache()
+    return results
+
+
+def bulk_cancel(user_ids: list[str], mode: str = DEFAULT_DELETION_MODE) -> list[dict]:
     """批量取消订阅 + 删 IDC 用户 + 删 DynamoDB 映射（副账号回收）。
 
     三件事必须同步，否则映射表会残留孤儿记录（IDC 已删但映射还在），
     导致 dashboard 显示幽灵账号、对其升级/操作报 USER not found。
-    取消订阅时 ResourceNotFound 视为成功（幂等）。
+    取消订阅时 ResourceNotFound 视为成功（幂等）。mode 见 DELETION_MODES：
+    回收场景通常选 immediate（用户随即被删，END_OF_PERIOD 的「保留访问到月底」无意义）。
     """
     from app.mapping_store import MappingStore
 
@@ -432,7 +520,7 @@ def bulk_cancel(user_ids: list[str]) -> list[dict]:
     results = []
     for uid in user_ids:
         try:
-            _delete_assignment(uid, creds, region)
+            _delete_assignment(uid, creds, region, mode)
             idc.delete_user(IdentityStoreId=id_store, UserId=uid)
             mapping.delete(uid)  # 同步清映射，避免孤儿记录
             results.append({"user_id": uid, "success": True, "error": ""})

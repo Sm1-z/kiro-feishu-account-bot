@@ -194,7 +194,7 @@ def test_upgrade_cancelled_goes_recreate():
 
 
 def test_upgrade_cancelled_conflict_reports_billing_hold():
-    """重订被 Conflict 拒（原订阅账期未结占位）→ 失败并给出可读提示。"""
+    """重订被 Conflict 拒 → 失败并给出可读提示（不假 executed）。"""
     session, live = _upgrade_env("CANCELLED")
     with patch("app.provisioner.get_session", return_value=session), \
          patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
@@ -232,3 +232,120 @@ def test_upgrade_no_subscription_goes_recreate():
         r = P.upgrade("zhangsan", "pro")
     assert r.success is True
     ca.assert_called_once()
+
+
+# ---- 停用方式 deletionMode（控制台「Deactivate Kiro plan」End of the month / Immediately）----
+
+def test_delete_assignment_default_mode_is_end_of_period():
+    """默认 END_OF_PERIOD，且 deletionMode 必须显式传（服务端对未知字段静默忽略，枚举要准）。"""
+    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
+        P._delete_assignment("u1", MagicMock(), "us-east-1")
+    payload = sp.call_args[0][4]
+    assert payload == {"principalId": "u1", "principalType": "USER", "deletionMode": "END_OF_PERIOD"}
+
+
+def test_delete_assignment_immediate_mode():
+    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
+        P._delete_assignment("u1", MagicMock(), "us-east-1", mode="immediate")
+    assert sp.call_args[0][4]["deletionMode"] == "IMMEDIATE"
+
+
+def test_delete_assignment_mode_case_insensitive():
+    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
+        P._delete_assignment("u1", MagicMock(), "us-east-1", mode=" Immediate ")
+    assert sp.call_args[0][4]["deletionMode"] == "IMMEDIATE"
+
+
+def test_delete_assignment_invalid_mode_rejected_before_call():
+    with patch.object(P, "_signed_post") as sp:
+        with pytest.raises(ValueError):
+            P._delete_assignment("u1", MagicMock(), "us-east-1", mode="whenever")
+    sp.assert_not_called()
+
+
+def test_deactivate_keeps_user_and_mapping_but_marks_cancelled():
+    """停用 ≠ 回收：只退订，不删 IDC 用户、不删映射，映射 status 快照改 cancelled。"""
+    mapping = MagicMock()
+    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "_delete_assignment") as da, \
+         patch.object(P, "_invalidate_live_cache") as inv:
+        res = P.deactivate(["uid-1", "uid-2"], mode="immediate")
+
+    assert [r["success"] for r in res] == [True, True]
+    assert da.call_count == 2
+    assert all(c.args[3] == "immediate" for c in da.call_args_list)
+    mapping.update_fields.assert_any_call("uid-1", status="cancelled")
+    mapping.update_fields.assert_any_call("uid-2", status="cancelled")
+    mapping.delete.assert_not_called()
+    inv.assert_called_once()
+
+
+def test_deactivate_partial_failure_isolated():
+    mapping = MagicMock()
+
+    def flaky(uid, creds, region, mode):
+        if uid == "uid-2":
+            raise RuntimeError("DeleteAssignment failed: HTTP 403")
+
+    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "_delete_assignment", side_effect=flaky):
+        res = P.deactivate(["uid-1", "uid-2"])
+
+    assert res[0]["success"] is True
+    assert res[1]["success"] is False and "403" in res[1]["error"]
+    mapping.update_fields.assert_called_once_with("uid-1", status="cancelled")
+
+
+def test_bulk_cancel_passes_mode_through():
+    idc = MagicMock()
+    session = MagicMock()
+    session.client.return_value = idc
+    with patch("app.provisioner.get_session", return_value=session), \
+         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
+         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=MagicMock()), \
+         patch.object(P, "_delete_assignment") as da:
+        P.bulk_cancel(["uid-1"], mode="immediate")
+    assert da.call_args.args[3] == "immediate"
+
+
+# ---- 恢复订阅（撤销月底停用）----
+
+def test_reactivate_uses_live_tier_and_marks_active():
+    mapping = MagicMock()
+    live = {"uid-1": {"status": "CANCELLED", "tier": "pro max"}}
+    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment", return_value=True) as ca:
+        res = P.reactivate(["uid-1"])
+    assert res[0]["success"] and res[0]["tier"] == "pro max"
+    assert ca.call_args.args[1] == "Q_DEVELOPER_STANDALONE_PRO_MAX"
+    mapping.update_fields.assert_called_once_with("uid-1", status="active", tier="pro max")
+
+
+def test_reactivate_falls_back_to_mapping_tier_when_no_live():
+    mapping = MagicMock()
+    mapping.get.return_value = MagicMock(tier="power")
+    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "live_subscription_map", side_effect=RuntimeError("down")), \
+         patch.object(P, "_create_assignment", return_value=True) as ca:
+        res = P.reactivate(["uid-1"])
+    assert res[0]["success"]
+    assert ca.call_args.args[1] == "Q_DEVELOPER_STANDALONE_POWER"
+
+
+def test_reactivate_conflict_and_unknown_tier_reported():
+    mapping = MagicMock()
+    mapping.get.return_value = None
+    live = {"uid-1": {"status": "CANCELLED", "tier": "pro"}}
+    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
+         patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch.object(P, "live_subscription_map", return_value=live), \
+         patch.object(P, "_create_assignment", return_value=False):
+        res = P.reactivate(["uid-1", "uid-2"])
+    assert res[0]["success"] is False and "Conflict" in res[0]["error"]
+    assert res[1]["success"] is False and "原套餐" in res[1]["error"]

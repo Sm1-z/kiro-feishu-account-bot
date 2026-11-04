@@ -33,6 +33,18 @@ class OverageCapIn(BaseModel):
     desired_value: float = Field(gt=0)
 
 
+class DeactivateIn(BaseModel):
+    """管理员停用/回收。mode 对应控制台「Deactivate Kiro plan」的两个选项。"""
+    kiro_user_ids: list[str] = Field(min_length=1, max_length=200)
+    mode: str = Field(default="end_of_period", pattern="^(end_of_period|immediate)$")
+    recycle: bool = False  # True = 退订后同时删 IDC 用户 + 解除映射（副账号回收）
+
+
+class ReactivateIn(BaseModel):
+    """管理员恢复订阅（撤销停用）：对 CANCELLED 账号按原套餐重新订阅。"""
+    kiro_user_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class GroupIn(BaseModel):
     group_name: str = Field(min_length=1, max_length=128)
 

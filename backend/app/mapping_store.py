@@ -39,6 +39,8 @@ from app.config import settings
 
 PRIMARY = "primary"
 SECONDARY = "secondary"
+ACTIVE = "active"
+CANCELLED = "cancelled"
 PERMANENT = "permanent"
 MONTHLY = "monthly"
 

@@ -116,15 +116,41 @@ DEMO_UNLINKED = [
      "display_name": "Legacy Service", "suggested_open_id": "", "suggested_name": "", "confidence": ""},
 ]
 
+# 费用/额度（计费口径）：张三主号 Pro Max $100、副号 Pro $20、李四 Pro+ $40、王五 Power $200 + 超额 $4.8、赵六 PENDING 未计费
+def _bill(plan, charges, limit, used, overage=0.0, pending=None, status="ACTIVE"):
+    return {"billing_synced": True, "billing_error": "", "plan_code": plan, "plan_start": "2026-06-01",
+            "current_charges": charges, "currency": "USD", "account_status": status,
+            "pending_plan": pending, "pending_scheduled": "2026-11-30" if pending else None,
+            "credit_used": used, "credit_limit": limit, "credit_unit": "INVOCATIONS",
+            "overage_charges": overage, "overage_rate": 0.04, "has_usage_entry": True}
+DEMO_BILLING = {
+    "u-001": _bill("KIRO_ENTERPRISE_PRO_MAX", 100.0, 5000.0, 862.5),
+    "u-002": _bill("KIRO_ENTERPRISE_PRO", 20.0, 1000.0, 35.3),
+    "u-003": _bill("KIRO_ENTERPRISE_PRO_PLUS", 40.0, 2000.0, 1740.8, pending="KIRO_ENTERPRISE_PRO_MAX"),
+    "u-004": _bill("KIRO_ENTERPRISE_POWER", 200.0, 10000.0, 10120.0, overage=4.8),
+    "u-005": _bill("KIRO_ENTERPRISE_PRO", 0.0, 1000.0, 0.0),
+}
+def _demo_month_usage(uid, year, month):
+    b = DEMO_BILLING.get(uid)
+    if not b or month % 2 == 0:  # 偶数月演示「无记录」
+        return {"user_id": uid, "year": year, "month": month, "credit_used": None, "credit_limit": None,
+                "credit_unit": None, "overage_charges": None, "overage_rate": None, "has_usage_entry": False}
+    return {"user_id": uid, "year": year, "month": month, "credit_used": b["credit_used"] * 0.8,
+            "credit_limit": b["credit_limit"], "credit_unit": "INVOCATIONS",
+            "overage_charges": b["overage_charges"], "overage_rate": 0.04, "has_usage_entry": True}
+
 import app.usage as usage_mod
 import app.quotas as quotas_mod
 import app.provisioner as prov_mod
+import app.billing as billing_mod
 
 patches = [
     patch.object(usage_mod, "get_usage_by_user", lambda force=False: DEMO_USAGE),
     patch.object(quotas_mod, "get_overage_cap", lambda force=False: DEMO_CAP),
     patch.object(quotas_mod, "get_pending_cap_request", lambda: None),
     patch.object(prov_mod, "live_subscription_map", lambda force=False: DEMO_LIVE),
+    patch.object(billing_mod, "get_billing_by_user", lambda ids, force=False: {u: DEMO_BILLING[u] for u in ids if u in DEMO_BILLING}),
+    patch.object(billing_mod, "get_user_month_usage", _demo_month_usage),
 ]
 for p in patches:
     p.start()

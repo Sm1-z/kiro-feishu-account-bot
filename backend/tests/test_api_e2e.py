@@ -157,3 +157,166 @@ def test_approve_dedup_via_api(client):
         second = client.post(f"/api/admin/requests/{rid}/approve", headers=_auth(ADMIN, "A"))
     assert first.status_code == 200
     assert second.status_code == 409
+
+
+# ---- 管理员停用 / 回收（即时执行 + 逐账号审计）----
+
+def _seed_mapping(uid, username, role="secondary"):
+    from app.mapping_store import AccountMapping, MappingStore
+    MappingStore().put(AccountMapping(
+        kiro_user_id=uid, feishu_open_id=USER, feishu_name="张三",
+        kiro_username=username, kiro_email=f"{username}@example.com",
+        tier="pro", account_role=role))
+
+
+def test_deactivate_requires_admin(client):
+    r = client.post("/api/admin/accounts/deactivate",
+                    json={"kiro_user_ids": ["u1"]}, headers=_auth(USER, "张三"))
+    assert r.status_code == 403
+
+
+def test_deactivate_rejects_bad_mode(client):
+    r = client.post("/api/admin/accounts/deactivate",
+                    json={"kiro_user_ids": ["u1"], "mode": "whenever"},
+                    headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 422
+
+
+def test_deactivate_default_end_of_period_and_audited(client):
+    _seed_mapping("u1", "zhangsan-2")
+    with patch("app.provisioner.deactivate",
+               return_value=[{"user_id": "u1", "success": True, "error": ""}]) as d, \
+         patch("app.provisioner.bulk_cancel") as bc:
+        r = client.post("/api/admin/accounts/deactivate",
+                        json={"kiro_user_ids": ["u1"]}, headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "end_of_period" and body["recycle"] is False
+    assert body["succeeded"] == 1 and body["failed"] == 0
+    assert body["results"][0]["username"] == "zhangsan-2"
+    d.assert_called_once_with(["u1"], "end_of_period")
+    bc.assert_not_called()
+    # 审计落 requests 表：type=deactivate / executed / 带 mode 与用户名
+    reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
+    audit = [q for q in reqs if q["type"] == "deactivate"]
+    assert len(audit) == 1
+    assert audit[0]["status"] == "executed"
+    assert audit[0]["kiro_user_id"] == "u1"
+    assert audit[0]["payload"] == {"mode": "end_of_period", "username": "zhangsan-2"}
+
+
+def test_recycle_immediate_routes_to_bulk_cancel_and_marks_failures(client):
+    _seed_mapping("u1", "a-2")
+    _seed_mapping("u2", "b-2")
+    results = [{"user_id": "u1", "success": True, "error": ""},
+               {"user_id": "u2", "success": False, "error": "DeleteAssignment failed: HTTP 403"}]
+    with patch("app.provisioner.bulk_cancel", return_value=results) as bc, \
+         patch("app.provisioner.deactivate") as d:
+        r = client.post("/api/admin/accounts/deactivate",
+                        json={"kiro_user_ids": ["u1", "u2"], "mode": "immediate", "recycle": True},
+                        headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["succeeded"] == 1 and body["failed"] == 1
+    bc.assert_called_once_with(["u1", "u2"], "immediate")
+    d.assert_not_called()
+    reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
+    audit = {q["kiro_user_id"]: q for q in reqs if q["type"] == "recycle"}
+    assert audit["u1"]["status"] == "executed"
+    assert audit["u2"]["status"] == "failed"
+    assert "403" in audit["u2"]["result"]["error"]
+
+
+def test_reactivate_endpoint_audited(client):
+    _seed_mapping("u1", "zhangsan-2")
+    with patch("app.provisioner.reactivate",
+               return_value=[{"user_id": "u1", "success": True, "error": "", "tier": "pro"}]) as ra:
+        r = client.post("/api/admin/accounts/reactivate",
+                        json={"kiro_user_ids": ["u1"]}, headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    assert r.json()["succeeded"] == 1 and r.json()["results"][0]["username"] == "zhangsan-2"
+    ra.assert_called_once_with(["u1"])
+    reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
+    audit = [q for q in reqs if q["type"] == "reactivate"]
+    assert len(audit) == 1 and audit[0]["status"] == "executed"
+    assert audit[0]["payload"] == {"username": "zhangsan-2", "tier": "pro"}
+
+
+# ---- 按人费用 / 额度列（Kiro Enterprise 计费直读）----
+
+BILLING_OK = {
+    "billing_synced": True, "billing_error": "", "plan_code": "KIRO_ENTERPRISE_POWER",
+    "plan_start": "2026-09-19", "current_charges": 200.0, "currency": "USD",
+    "account_status": "ACTIVE", "pending_plan": None, "pending_scheduled": None,
+    "credit_used": 1234.5, "credit_limit": 10000.0, "credit_unit": "INVOCATIONS",
+    "overage_charges": 3.2, "overage_rate": 0.04, "has_usage_entry": True,
+}
+
+
+def test_accounts_include_billing_fields(client):
+    _seed_mapping("u1", "zhangsan", role="primary")
+    _seed_mapping("u2", "zhangsan-2")
+    with patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}) as gb, \
+         patch("app.provisioner.live_subscription_map", return_value={}), \
+         patch("app.usage.get_usage_by_user", return_value={}):
+        r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    rows = {x["kiro_user_id"]: x for x in r.json()}
+    # 调用传入全部账号 id，且透传 force
+    called_ids = gb.call_args.args[0]
+    assert set(called_ids) == {"u1", "u2"} and gb.call_args.kwargs["force"] is False
+    u1 = rows["u1"]
+    assert u1["billing_synced"] is True
+    assert u1["billing_plan_code"] == "KIRO_ENTERPRISE_POWER"
+    assert u1["billing_current_charges"] == 200.0 and u1["billing_currency"] == "USD"
+    assert u1["billing_credit_used"] == 1234.5 and u1["billing_credit_limit"] == 10000.0
+    assert u1["billing_overage_charges"] == 3.2 and u1["billing_overage_rate"] == 0.04
+    assert u1["billing_account_status"] == "ACTIVE"
+    # 没有计费数据的账号：synced=False、字段 None，列表不中断
+    u2 = rows["u2"]
+    assert u2["billing_synced"] is False and u2["billing_error"] == "unavailable"
+    assert u2["billing_current_charges"] is None and u2["billing_credit_limit"] is None
+
+
+def test_accounts_force_passes_through_to_billing(client):
+    _seed_mapping("u1", "zhangsan")
+    with patch("app.billing.get_billing_by_user", return_value={}) as gb, \
+         patch("app.provisioner.live_subscription_map", return_value={}), \
+         patch("app.usage.get_usage_by_user", return_value={}):
+        r = client.get("/api/admin/accounts?force=true", headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    assert gb.call_args.kwargs["force"] is True
+
+
+def test_accounts_billing_total_failure_degrades(client):
+    """计费服务整体不可用（返回 {}）→ 账号列表照常，billing 字段全部 None。"""
+    _seed_mapping("u1", "zhangsan")
+    with patch("app.billing.get_billing_by_user", return_value={}), \
+         patch("app.provisioner.live_subscription_map", return_value={}), \
+         patch("app.usage.get_usage_by_user", return_value={}):
+        r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200
+    assert r.json()[0]["billing_synced"] is False
+    assert r.json()[0]["billing_current_charges"] is None
+
+
+def test_billing_history_endpoint(client):
+    hist = {"user_id": "u1", "year": 2026, "month": 10, "credit_used": 500.0,
+            "credit_limit": 10000.0, "credit_unit": "INVOCATIONS",
+            "overage_charges": 0.0, "overage_rate": 0.04, "has_usage_entry": True}
+    with patch("app.billing.get_user_month_usage", return_value=hist) as gm:
+        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
+                       headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 200 and r.json()["credit_used"] == 500.0
+    gm.assert_called_once_with("u1", 2026, 10)
+
+
+def test_billing_history_validation_and_failure(client):
+    assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=13",
+                      headers=_auth(ADMIN, "Admin")).status_code == 400
+    assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
+                      headers=_auth(USER, "张三")).status_code == 403
+    with patch("app.billing.get_user_month_usage", side_effect=RuntimeError("HTTP 403")):
+        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
+                       headers=_auth(ADMIN, "Admin"))
+    assert r.status_code == 502 and "HTTP 403" in r.json()["detail"]

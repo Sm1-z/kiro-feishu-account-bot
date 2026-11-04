@@ -15,7 +15,7 @@
     request_id    (PK)   uuid
     user_open_id         申请人飞书 open_id
     user_name            申请人飞书姓名（快照）
-    type                 apply / upgrade / quota_increase
+    type                 apply / upgrade / quota_increase / overage_cap / deactivate / recycle / reactivate
     status               pending / approved / executed / failed / rejected
     payload              申请详情（dict）
     result               执行结果（dict：user_id+steps 或 error）
@@ -48,6 +48,9 @@ APPLY = "apply"
 UPGRADE = "upgrade"
 QUOTA_INCREASE = "quota_increase"
 OVERAGE_CAP = "overage_cap"  # 管理员调高 Overages 上限（即时执行，无审批流，纯审计记录）
+DEACTIVATE = "deactivate"    # 管理员停用订阅（保留 IDC 用户/映射；即时执行，纯审计记录）
+RECYCLE = "recycle"          # 管理员回收账号（退订 + 删 IDC 用户 + 删映射；即时执行，纯审计记录）
+REACTIVATE = "reactivate"    # 管理员恢复订阅（撤销月底停用：对 CANCELLED 账号重新订阅；即时执行，纯审计记录）
 
 
 def _now() -> int:

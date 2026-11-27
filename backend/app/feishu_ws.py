@@ -4,8 +4,9 @@
 """飞书 WebSocket 长连接：接收卡片审批回调，免公网域名。
 
 设计 03/A3：lark-oapi WS 长连接接收 card.action.trigger。
-关键：卡片回调有 ~3s 超时，故 _handle_card_action 立即返回「处理中」卡片，
-真正的 AWS 开通在后台线程跑（threading.Thread daemon）。
+关键：卡片回调有 ~3s 超时，handle_card_action 只做本地校验并立刻回 toast，
+不碰任何 AWS 调用；读申请 / 防重抢占 / 开通 / 更新卡片全部在后台线程完成
+（_process_card_action）。AWS 偶尔变慢或凭证刷新（本地用 credential_process 时每次 ~3s）也不会超时。
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import threading
 from app import cards
 from app.approval import ApprovalService
 from app.config import settings
-from app.request_store import APPROVED, EXECUTED, PENDING, REJECTED
+from app.request_store import APPROVED, EXECUTED, PENDING
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +32,54 @@ def _run_execution(request_id: str, reviewer_name: str) -> None:
         logger.exception("后台执行审批失败: %s", request_id)
 
 
+def _update_cards(req, card: dict) -> None:
+    from app import feishu
+    for mid in req.notify_message_ids:
+        try:
+            feishu.update_card(mid, card)
+        except Exception:
+            logger.exception("更新审批卡片失败: %s", mid)
+
+
+def _process_card_action(action: str, request_id: str, open_id: str) -> None:
+    """后台线程：读申请 → 防重抢占 → 执行 → 更新所有审批卡片 / 通知申请人。"""
+    try:
+        svc = ApprovalService()
+        req = svc.requests.get(request_id)
+        if not req:
+            logger.warning("卡片回调：申请不存在 %s", request_id)
+            return
+        reviewer_name = open_id  # 简化：用 open_id 作展示名（可后续查通讯录）
+        if req.status != PENDING:
+            # 已被处理（另一位管理员 / Web 后台）：把卡片刷成无按钮终态，防其它端按钮回退
+            _update_cards(req, cards.build_final_card(
+                req.type, req.user_name, req.payload, "管理员",
+                approved=req.status in (APPROVED, EXECUTED)))
+            return
+        if action == "approve":
+            if not svc.claim_approve(request_id, open_id):
+                return
+            _update_cards(req, cards.build_processing_card(
+                req.type, req.user_name, req.payload, reviewer_name))
+            _run_execution(request_id, reviewer_name)
+        else:
+            if not svc.claim_reject(request_id, open_id):
+                return
+            req = svc.requests.get(request_id) or req
+            svc.notify_after_execution(req, reviewer_name)  # 拒绝：刷终态卡片 + 通知申请人
+    except Exception:
+        logger.exception("处理卡片回调失败: %s", request_id)
+
+
 def handle_card_action(data):
-    """卡片按钮回调处理。必须快速返回（~3s 超时）。"""
+    """卡片按钮回调。飞书要求约 3s 内响应：这里只做本地校验并立刻回 toast，其余交给后台线程。"""
     from lark_oapi.event.callback.model.p2_card_action_trigger import (
-        CallBackCard, CallBackToast, P2CardActionTriggerResponse,
+        CallBackToast, P2CardActionTriggerResponse,
     )
 
     event = data.event
     open_id = event.operator.open_id if event.operator else ""
-    value = event.action.value if event.action else {}
+    value = (event.action.value if event.action else None) or {}
 
     resp = P2CardActionTriggerResponse()
     toast = CallBackToast()
@@ -57,63 +97,10 @@ def handle_card_action(data):
         toast.content = "未知操作"
         return resp
 
-    svc = ApprovalService()
-    req = svc.requests.get(request_id)
-    if not req:
-        toast.type = "error"
-        toast.content = "申请不存在"
-        return resp
-    if req.status != PENDING:
-        toast.type = "info"
-        toast.content = f"该申请已处理（{req.status}）"
-        # 返回无按钮终态卡片，防其它端按钮回退
-        final = cards.build_final_card(
-            req.type, req.user_name, req.payload, "管理员",
-            approved=req.status in (APPROVED, EXECUTED))
-        card = CallBackCard(); card.type = "raw"; card.data = final
-        resp.card = card
-        return resp
-
-    reviewer_name = open_id  # 简化：用 open_id 作展示名（可后续查通讯录）
-
-    if action == "approve":
-        if not svc.claim_approve(request_id, open_id):
-            toast.type = "info"
-            toast.content = "该申请已被处理"
-            return resp
-        # 后台执行 AWS 开通
-        threading.Thread(target=_run_execution, args=(request_id, reviewer_name),
-                         daemon=True).start()
-        toast.type = "info"
-        toast.content = "已受理，正在执行…"
-        processing = cards.build_processing_card(req.type, req.user_name, req.payload, reviewer_name)
-        card = CallBackCard(); card.type = "raw"; card.data = processing
-        resp.card = card
-    else:  # reject
-        if not svc.claim_reject(request_id, open_id):
-            toast.type = "info"
-            toast.content = "该申请已被处理"
-            return resp
-        final = cards.build_final_card(req.type, req.user_name, req.payload,
-                                       reviewer_name, approved=False)
-        for mid in req.notify_message_ids:
-            try:
-                from app import feishu
-                feishu.update_card(mid, final)
-            except Exception:
-                pass
-        # 通知申请人
-        try:
-            from app import feishu
-            feishu.send_card(req.user_open_id,
-                             cards.build_user_result_card(req.type, req.payload, success=False))
-        except Exception:
-            pass
-        toast.type = "success"
-        toast.content = "已拒绝"
-        card = CallBackCard(); card.type = "raw"; card.data = final
-        resp.card = card
-
+    threading.Thread(target=_process_card_action, args=(action, request_id, open_id),
+                     daemon=True).start()
+    toast.type = "info"
+    toast.content = "已受理，正在处理…" if action == "approve" else "已受理，正在处理拒绝…"
     return resp
 
 

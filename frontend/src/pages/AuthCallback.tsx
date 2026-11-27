@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: MIT-0
 
 import { useEffect } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { Spin } from 'antd'
 
 export default function AuthCallback() {
-  const [params] = useSearchParams()
   const nav = useNavigate()
   useEffect(() => {
-    const token = params.get('token')
+    // 后端把 token 放在 URL fragment（#token=…）里：不会发给服务器、不进访问日志和 Referer
+    const token = new URLSearchParams(window.location.hash.slice(1)).get('token')
+    window.history.replaceState(null, '', window.location.pathname)
     if (token) {
       localStorage.setItem('token', token)
       nav('/', { replace: true })

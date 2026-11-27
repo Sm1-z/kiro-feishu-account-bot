@@ -43,6 +43,8 @@ def health():
 
 @app.on_event("startup")
 def _startup():
+    if len(settings.jwt_secret) < 32:
+        logger.error("JWT_SECRET 未配置或少于 32 个字符：登录与所有 API 将拒绝服务，请在 .env 配置随机长字符串")
     # 仅在配置了飞书凭证时启动 WS（测试/本地无凭证时跳过）
     if settings.feishu_app_id and settings.feishu_app_secret:
         try:
@@ -58,6 +60,17 @@ def _startup():
 # 前端是 BrowserRouter（history 模式），/auth/callback、/admin 等是客户端路由，
 # 磁盘上无对应文件。StaticFiles 默认会对这些路径返回 404，故需 SPA fallback：
 # 真实静态资源走 StaticFiles，其余非 /api 路径一律回退 index.html 交前端路由处理。
+def resolve_static(root: str, full_path: str) -> str | None:
+    """把请求路径映射到 root 目录内的真实文件；越界（如「..%2f」解码后的 ../）或不存在返回 None。"""
+    if not full_path:
+        return None
+    root = os.path.realpath(root)
+    candidate = os.path.realpath(os.path.join(root, full_path))
+    if os.path.commonpath([root, candidate]) != root or not os.path.isfile(candidate):
+        return None
+    return candidate
+
+
 _static = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(_static):
     from fastapi.responses import FileResponse
@@ -72,8 +85,10 @@ if os.path.isdir(_static):
 
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str):
-        # /api/* 已由上面的路由处理；走到这里的非 api 路径一律回退 SPA 入口
-        candidate = os.path.join(_static, full_path)
-        if full_path and os.path.isfile(candidate):
+        # /api/* 已由上面的路由处理；走到这里的非 api 路径一律回退 SPA 入口。
+        # 只允许返回 static 目录内的文件：路径参数已做过百分号解码，「..%2f」会变成「../」，
+        # 必须按真实路径校验，否则可以读到 static 之外的文件（如 backend/.env）。
+        candidate = resolve_static(_static, full_path)
+        if candidate:
             return FileResponse(candidate)
         return FileResponse(_index)

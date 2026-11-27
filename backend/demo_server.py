@@ -6,13 +6,13 @@
 moto mock 全部 AWS + patch 用量 / 积分池 / 配额为演示数据（预付池，席位已满），
 seed 虚构用户（张三/李四/王五/赵六），本地起 uvicorn（仅 127.0.0.1）供 Playwright 截图。
 写操作（停用 / 设上限 / 审批开通）全部 patch 成不连 AWS 的假成功。
-用法：JWT_SECRET=demo ADMIN_OPEN_IDS=ou_demo_admin python demo_server.py
+用法：ADMIN_OPEN_IDS=ou_demo_admin python demo_server.py
 """
 import os
 import sys
 from unittest.mock import patch
 
-os.environ.setdefault("JWT_SECRET", "demo-secret")
+os.environ.setdefault("JWT_SECRET", "demo-secret-only-for-local-screenshots-0123")
 os.environ.setdefault("ADMIN_OPEN_IDS", "ou_demo_admin")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")

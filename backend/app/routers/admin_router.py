@@ -17,7 +17,7 @@ from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import RequestStore
 from app.schemas import (
-    DeactivateIn, GroupIn, ImportLinkIn, ManualLinkIn, OverageCapIn, ReactivateIn, ReviewIn,
+    DeactivateIn, GroupIn, ImportLinkIn, LimitSetIn, ManualLinkIn, ReactivateIn, ReviewIn,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -60,6 +60,10 @@ def reject(request_id: str, body: ReviewIn, admin: CurrentUser = Depends(require
 @router.get("/users")
 def list_users(_: CurrentUser = Depends(require_admin)):
     """全量映射（飞书用户 → 账号）。前端按 feishu_open_id 聚合展示一人多账号。"""
+    return _scan_mappings()
+
+
+def _scan_mappings() -> list[dict]:
     store = MappingStore()
     items, kwargs = [], {}
     while True:
@@ -73,55 +77,46 @@ def list_users(_: CurrentUser = Depends(require_admin)):
 
 @router.get("/accounts")
 def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
-    """账号总览：全量映射 + JOIN 订阅实况 + JOIN Kiro 用量（对接 Analytics Dashboard）。
+    """账号总览：全量映射 + JOIN 积分池实况 + JOIN 生效上限 + JOIN Kiro 用量。
 
-    - 映射表的 status/tier 是平台操作时的快照；管理员在 AWS 控制台直接退订/改套餐
-      不会回写映射表，所以每次都拉 ListUserSubscriptions 实况（live_* 字段），
-      前端以 live 为准展示、快照留作对照。实况拉取失败时 live_synced=False 降级。
-    - 用量关联键 = kiro_user_id = Athena 表 userid，应用层拼接；
-      Athena 未配置/失败时 usage 字段为 None（前端显示 —），不阻断账号列表。
-    - 费用/额度（billing_* 字段）：套餐、本周期费用、月额度、超额单价直读订阅计费服务（按用户，Kiro Enterprise）；
-      **本月已用 credits 与超额 credits 取自 User Activity Report 的本月聚合（活动口径，日级）**，
-      与 Kiro 控制台 Dashboard 一致；计费服务返回的用量字段仅作参考，保留在 billing_reported_* 字段。
-      超额费用 = 本月超额 credits × 超额单价（预估）。
-    - force=true 时绕过用量/费用 TTL 缓存强制重查（刷新按钮用）。
+    - 映射表的 status / usage_limit 是平台操作时的快照；管理员在控制台直接移出 / 改上限不会回写，
+      所以每次都拉池实况（pool_status：SEATED 已占座 / AWAITING_SEAT 等待席位 / None 不在池里）。
+      实况拉取失败时 live_synced=False，前端回退快照。
+    - 生效上限（limit / limit_scope）按人查 GetEffectiveUsageLimit：limit_scope 为 USER / GROUP / POOL，
+      NONE = 无上限，None = 查询失败。
+    - 用量来自 User Activity Report（Athena）：累计 usage_* 与本月 month_*；
+      报表未配置 / 失败时为 None（前端显示 —），不阻断账号列表。
+    - force=true 绕过缓存强制重查（刷新按钮用）。
     """
-    from app.billing import DEFAULT_OVERAGE_RATE, get_billing_by_user
-    from app.provisioner import live_subscription_map
+    from app import pool
+    from app.provisioner import live_status_map
     from app.usage import get_current_month_usage_by_user, get_usage_by_user
 
-    store = MappingStore()
-    items, kwargs = [], {}
-    while True:
-        resp = store._table.scan(**kwargs)
-        items.extend(resp.get("Items", []))
-        if "LastEvaluatedKey" not in resp:
-            break
-        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
+    items = _scan_mappings()
     live_synced = True
     try:
-        live = live_subscription_map(force=force)  # {user_id: {status, tier}}
+        live = live_status_map(force=force)
     except Exception:
         live, live_synced = {}, False
-
-    usage = get_usage_by_user(force=force)  # {userid: {...}}，失败返回 {}
     user_ids = [it.get("kiro_user_id", "") for it in items]
-    billing = get_billing_by_user(user_ids, force=force)  # {userid: {...}}，失败返回 {}
-    month_usage = get_current_month_usage_by_user(force=force)  # {userid: {credits, overage, ...}}，失败返回 {}
+    try:
+        limits = pool.effective_limits(user_ids, force=force)
+    except Exception:
+        limits = {}
+    usage = get_usage_by_user(force=force)
+    month_usage = get_current_month_usage_by_user(force=force)
     month_available = bool(month_usage)
     out = []
     for it in items:
         uid = it.get("kiro_user_id", "")
-        u = usage.get(uid)
-        lv = live.get(uid)
-        b = billing.get(uid)
-        mu = month_usage.get(uid)
-        # 本月已用 / 超额 credits：报表可用但该用户无记录 = 0；报表不可用 = None
-        mtd_credits = mu["credits"] if mu else (0.0 if month_available else None)
-        mtd_overage = mu["overage"] if mu else (0.0 if month_available else None)
-        rate = (b or {}).get("overage_rate") or DEFAULT_OVERAGE_RATE
-        overage_est = round(mtd_overage * rate, 4) if mtd_overage is not None else None
+        u, lv, mu = usage.get(uid), live.get(uid), month_usage.get(uid)
+        if uid in limits:
+            eff = limits[uid]
+            limit, scope = (eff["limit"], eff["scope"]) if eff else (None, "NONE")
+        else:
+            limit, scope = None, None
+        month_credits = mu["credits"] if mu else (0.0 if month_available else None)
+        snap_limit = it.get("usage_limit")
         out.append({
             "kiro_user_id": uid,
             "feishu_open_id": it.get("feishu_open_id", ""),
@@ -129,186 +124,209 @@ def list_accounts(force: bool = False, _: CurrentUser = Depends(require_admin)):
             "kiro_username": it.get("kiro_username", ""),
             "kiro_email": it.get("kiro_email", ""),
             "team": it.get("team", ""),
-            "tier": it.get("tier", ""),
             "status": it.get("status", ""),
             "account_role": it.get("account_role", ""),
-            # 订阅实况（live_synced=False 时不可信，前端回退快照）
+            "usage_limit": int(snap_limit) if snap_limit is not None else None,
+            # 积分池实况（live_synced=False 时不可信，前端回退快照）
             "live_synced": live_synced,
-            "live_status": lv["status"] if lv else None,  # None = 无订阅（已退订/未订阅）
-            "live_tier": lv["tier"] if lv else None,
-            # 用量（None = 无数据/未配置；0 = 有数据但未使用，前端可区分）
+            "pool_status": lv["status"] if lv else None,
+            "pool_direct": lv["direct"] if lv else None,
+            # 生效上限
+            "limit": limit,
+            "limit_scope": scope,
+            "limit_used_pct": (round(month_credits / limit * 100, 1)
+                               if month_credits is not None and limit else None),
+            # 用量（None = 无数据 / 未配置；0 = 有数据但未使用）
             "usage_messages": u["messages"] if u else None,
             "usage_credits": round(u["credits"], 2) if u else None,
-            "usage_conversations": u["conversations"] if u else None,
             "usage_last_active": u["last_active"] if u else None,
             "usage_active_days": u["active_days"] if u else None,
-            # 费用/额度（计费口径，None = 查询失败或无订阅记录）
-            "billing_synced": bool(b and b.get("billing_synced")),
-            "billing_error": (b or {}).get("billing_error", "") if b else "unavailable",
-            "billing_plan_code": (b or {}).get("plan_code"),
-            "billing_plan_start": (b or {}).get("plan_start"),
-            "billing_current_charges": (b or {}).get("current_charges"),
-            "billing_currency": (b or {}).get("currency", "USD"),
-            "billing_account_status": (b or {}).get("account_status"),
-            "billing_pending_plan": (b or {}).get("pending_plan"),
-            "billing_pending_scheduled": (b or {}).get("pending_scheduled"),
-            "billing_credit_limit": (b or {}).get("credit_limit"),
-            "billing_overage_rate": (b or {}).get("overage_rate"),
-            # 本月活动（User Activity Report 本月聚合）：消息数 / 活跃天数 / 最后活跃；None = 报表不可用
-            "usage_month_messages": (mu["messages"] if mu else (0 if month_available else None)),
-            "usage_month_active_days": (mu["active_days"] if mu else (0 if month_available else None)),
-            "usage_month_last_active": (mu["last_active"] if mu and mu.get("last_active") else None),
-            # 本月已用 / 超额：活动口径（User Activity Report 本月聚合），None = 报表不可用
-            "billing_credit_used": mtd_credits,
-            "billing_credit_used_source": "athena_mtd" if month_available else None,
-            "billing_overage_credits": mtd_overage,
-            "billing_overage_charges": overage_est,  # 预估 = 超额 credits × 单价
-            # 订阅计费服务返回的用量字段（仅作参考）
-            "billing_reported_credit_used": (b or {}).get("credit_used"),
-            "billing_reported_overage_charges": (b or {}).get("overage_charges"),
+            "month_credits": round(month_credits, 2) if month_credits is not None else None,
+            "month_messages": mu["messages"] if mu else (0 if month_available else None),
+            "month_active_days": mu["active_days"] if mu else (0 if month_available else None),
+            "month_last_active": mu["last_active"] if mu and mu.get("last_active") else None,
         })
     return out
 
 
-@router.get("/accounts/{kiro_user_id}/billing-history")
-def billing_history(kiro_user_id: str, year: int, month: int,
-                    _: CurrentUser = Depends(require_admin)):
-    """某账号某月的用量 / 超额（历史回溯，出账对账 / 计费争议用）。
+@router.get("/accounts/{kiro_user_id}/usage-history")
+def usage_history(kiro_user_id: str, year: int, month: int,
+                  _: CurrentUser = Depends(require_admin)):
+    """某账号某月的用量（User Activity Report 按 UTC 自然月聚合），用于月度复盘 / 对账。
 
-    数据源 = User Activity Report 按自然月聚合（活动口径）。订阅计费服务的按用户历史对企业用户为空，不用。
-    月额度与超额单价取当前订阅（计费服务），用于换算超额预估费用。
-    available=False 表示报表未配置/不可用；has_usage_entry=False 表示该月无记录。
+    available=False 表示报表未配置；has_usage_entry=False 表示该月无记录。
     """
     from app import usage as usage_mod
-    from app.billing import DEFAULT_OVERAGE_RATE, get_billing_by_user
 
     if not (2024 <= year <= 2100) or not (1 <= month <= 12):
         raise HTTPException(400, "year/month 不合法")
     available = usage_mod._enabled()
     data = usage_mod.get_month_usage_by_user(year, month) if available else {}
     mu = data.get(kiro_user_id)
-    b = (get_billing_by_user([kiro_user_id]) or {}).get(kiro_user_id) or {}
-    rate = b.get("overage_rate") or DEFAULT_OVERAGE_RATE
-    out = {
+    return {
         "user_id": kiro_user_id, "year": year, "month": month,
         "source": "athena" if available else None, "available": available,
         "has_usage_entry": bool(mu),
         "credit_used": mu["credits"] if mu else None,
-        "overage_credits": mu["overage"] if mu else None,
-        "overage_rate": rate,
-        "overage_charges_est": round(mu["overage"] * rate, 4) if mu else None,
         "messages": mu["messages"] if mu else None,
         "active_days": mu["active_days"] if mu else None,
         "last_active": mu["last_active"] if mu else None,
-        "credit_limit": b.get("credit_limit"),   # 当前套餐额度，仅供参照
-        "plan_code": b.get("plan_code"),
     }
+
+
+@router.get("/pool")
+def pool_overview(force: bool = False, _: CurrentUser = Depends(require_admin)):
+    """积分池总览：余额 / 消耗速度 / 预计耗尽 + 席位 + profile 默认上限 + 购买记录 + 配额。
+
+    各部分独立降级：某项失败为 None 并记到 errors，不影响其余部分。
+    """
+    from app import pool, quotas
+
+    out: dict = {"errors": [], "console_url": settings.kiro_console_url}
+    try:
+        ctx = pool.get_context(force=force)
+        out["context"] = {"payment_model": ctx.payment_model, "prepaid": ctx.prepaid,
+                          "region": ctx.region, "account_id": ctx.account_id}
+    except Exception as exc:  # noqa: BLE001 - 上下文拿不到其余都无从谈起
+        out["context"] = None
+        out["errors"].append(f"context: {exc}")
+        return out
+    for key, fn in (("balance", lambda: pool.overview(force=force)),
+                    ("seats", lambda: {k: v for k, v in pool.seat_status(force=force).items()
+                                       if k != "users"}),
+                    ("profile_limit", lambda: pool.profile_limit(force=force)),
+                    ("purchases", lambda: pool.list_credit_purchases(force=force)),
+                    ("quotas", lambda: quotas.get_kiro_quotas(force=force))):
+        try:
+            out[key] = fn()
+        except Exception as exc:  # noqa: BLE001
+            out[key] = None
+            out["errors"].append(f"{key}: {exc}")
     return out
 
 
-@router.get("/overage-cap")
-def overage_cap(_: CurrentUser = Depends(require_admin)):
-    """Overages 超额上限（Service Quotas，USD/订阅）。查询失败返回 cap=None（前端显示 —）。"""
-    from app.quotas import get_overage_cap, get_pending_cap_request
+@router.get("/limits")
+def list_limits(force: bool = False, _: CurrentUser = Depends(require_admin)):
+    """已设置的全部上限（USER / GROUP / POOL）。"""
+    from app import pool
 
-    cap = get_overage_cap()
-    pending = None
-    if cap is not None:
-        try:
-            pending = get_pending_cap_request()
-        except Exception:
-            pending = None  # pending 查询失败不影响 cap 展示
-    return {"cap": cap, "pending": pending}
-
-
-@router.post("/overage-cap")
-def raise_overage_cap(body: OverageCapIn, admin: CurrentUser = Depends(require_admin)):
-    """调高 Overages 上限（increase-only）。即时执行，落 requests 表做审计。"""
-    from app import request_store as RS
-    from app.quotas import get_overage_cap, request_cap_increase
-
-    before = get_overage_cap()
     try:
-        result = request_cap_increase(body.desired_value)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    # 审计：谁、何时、从多少调到多少。执行已完成，直接落 executed。
-    RS.RequestStore().create(RS.Request(
-        user_open_id=admin.open_id, user_name=admin.name, type=RS.OVERAGE_CAP,
-        status=RS.EXECUTED, reviewer_open_id=admin.open_id,
-        payload={"from": str(before["value"] if before else "?"),
-                 "to": str(body.desired_value)},
-        result={"status": result["status"], "request_id": result["request_id"]},
-    ))
-    return result
+        return pool.list_limits(force=force)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"查询上限失败: {exc}")
 
 
-@router.post("/accounts/deactivate")
-def deactivate_accounts(body: DeactivateIn, admin: CurrentUser = Depends(require_admin)):
-    """停用 / 回收账号（即时执行，管理员动作，逐账号落 requests 表审计）。
+@router.post("/limits")
+def set_limit(body: LimitSetIn, admin: CurrentUser = Depends(require_admin)):
+    """管理员直接设置 / 删除上限（即时生效，落 requests 表审计）。
 
-    对应 Kiro 控制台「Deactivate Kiro plan」：
-    - mode=end_of_period（默认）：访问与计费都到月底结束，期间订阅实况为 CANCELLED；
-    - mode=immediate：立即切断访问，**当月仍整月计费**（不省钱），适合离职/安全事件。
-    recycle=True 时额外删 IDC 用户 + 解除映射（副账号回收，不可逆）。
-    返回逐账号结果；部分失败时整体 HTTP 200，由前端按行展示 error。
+    scope=USER：某账号的个人上限；scope=POOL：profile 默认上限（每人每月）。
+    usage_limit=None 表示删除；0 表示禁止使用。
     """
+    from app import pool
     from app import request_store as RS
-    from app.provisioner import bulk_cancel, deactivate
 
+    if body.scope == "USER" and not body.scope_id:
+        raise HTTPException(400, "设置个人上限需要 scope_id（账号 UserId）")
     store = MappingStore()
-    name_of = {}
-    for uid in body.kiro_user_ids:
-        m = store.get(uid)
-        name_of[uid] = m.kiro_username if m else ""
+    acct = store.get(body.scope_id) if body.scope == "USER" else None
+    try:
+        before = (pool.effective_limit(body.scope_id) if body.scope == "USER"
+                  else pool.profile_limit(force=True))
+    except Exception:  # noqa: BLE001 - before 只用于审计
+        before = "?"
+    try:
+        pool.set_limit(body.scope, body.scope_id, body.usage_limit)
+    except pool.PoolError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"设置上限失败: {exc}")
+    if acct:
+        try:
+            store.update_fields(body.scope_id, usage_limit=body.usage_limit)
+        except Exception:  # noqa: BLE001
+            pass
+    RS.RequestStore().create(RS.Request(
+        user_open_id=admin.open_id, user_name=admin.name, type=RS.LIMIT_SET,
+        status=RS.EXECUTED, reviewer_open_id=admin.open_id,
+        kiro_user_id=body.scope_id if body.scope == "USER" else "",
+        payload={"scope": body.scope, "username": acct.kiro_username if acct else "",
+                 "from": str(before), "to": "删除" if body.usage_limit is None else str(body.usage_limit)},
+        result={"ok": True},
+    ))
+    return {"scope": body.scope, "scope_id": body.scope_id, "usage_limit": body.usage_limit}
 
-    if body.recycle:
-        results = bulk_cancel(body.kiro_user_ids, body.mode)
-        rtype = RS.RECYCLE
-    else:
-        results = deactivate(body.kiro_user_ids, body.mode)
-        rtype = RS.DEACTIVATE
 
-    # 审计：谁、何时、对哪个账号、哪种方式、结果。执行已完成，直接落 executed/failed。
+def _audit_batch(admin: CurrentUser, rtype: str, results: list[dict], name_of: dict,
+                 extra: dict | None = None) -> None:
+    from app import request_store as RS
+
     rs = RS.RequestStore()
     for r in results:
         rs.create(RS.Request(
             user_open_id=admin.open_id, user_name=admin.name, type=rtype,
             status=RS.EXECUTED if r["success"] else RS.FAILED,
             reviewer_open_id=admin.open_id, kiro_user_id=r["user_id"],
-            payload={"mode": body.mode, "username": name_of.get(r["user_id"], "")},
-            result={"error": r["error"]} if r["error"] else {"ok": True},
+            payload={"username": name_of.get(r["user_id"], ""), **(extra or {})},
+            result={"error": r["error"]} if r.get("error") else
+                   {"ok": True, **({"warning": r["warning"]} if r.get("warning") else {})},
         ))
-    for r in results:
         r["username"] = name_of.get(r["user_id"], "")
-    return {"mode": body.mode, "recycle": body.recycle, "results": results,
+
+
+def _names(user_ids: list[str]) -> dict:
+    store = MappingStore()
+    out = {}
+    for uid in user_ids:
+        m = store.get(uid)
+        out[uid] = m.kiro_username if m else ""
+    return out
+
+
+@router.post("/accounts/deactivate")
+def deactivate_accounts(body: DeactivateIn, admin: CurrentUser = Depends(require_admin)):
+    """停用 = 移出积分池（即时生效，保留 IDC 用户与映射）；recycle=True 时另删 IDC 用户 + 解除映射。
+
+    已用的 credits 不退，本账期席位费照收，下个账期起不再计费。逐账号落 requests 表审计；
+    部分失败时整体 HTTP 200，由前端按行展示 error。
+    """
+    from app import request_store as RS
+    from app.provisioner import bulk_cancel, deactivate
+
+    name_of = _names(body.kiro_user_ids)
+    if body.recycle:
+        results, rtype = bulk_cancel(body.kiro_user_ids), RS.RECYCLE
+    else:
+        results, rtype = deactivate(body.kiro_user_ids), RS.DEACTIVATE
+    _audit_batch(admin, rtype, results, name_of)
+    return {"recycle": body.recycle, "results": results,
             "succeeded": sum(1 for r in results if r["success"]),
             "failed": sum(1 for r in results if not r["success"])}
 
 
 @router.post("/accounts/reactivate")
 def reactivate_accounts(body: ReactivateIn, admin: CurrentUser = Depends(require_admin)):
-    """恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐重新订阅，逐账号审计。
-
-    对应控制台停用成功提示里的 "You can cancel this removal by resubscribing them
-    before the end of the month"。实测两种停用方式后同月都可重订，订阅回到 PENDING。
-    """
+    """恢复 = 重新加入积分池（预付池同时分配席位，席位不足时成功但带 warning）。"""
     from app import request_store as RS
     from app.provisioner import reactivate
 
-    store = MappingStore()
-    name_of = {uid: (store.get(uid).kiro_username if store.get(uid) else "") for uid in body.kiro_user_ids}
+    name_of = _names(body.kiro_user_ids)
     results = reactivate(body.kiro_user_ids)
-    rs = RS.RequestStore()
-    for r in results:
-        rs.create(RS.Request(
-            user_open_id=admin.open_id, user_name=admin.name, type=RS.REACTIVATE,
-            status=RS.EXECUTED if r["success"] else RS.FAILED,
-            reviewer_open_id=admin.open_id, kiro_user_id=r["user_id"],
-            payload={"username": name_of.get(r["user_id"], ""), "tier": r.get("tier", "")},
-            result={"error": r["error"]} if r["error"] else {"ok": True},
-        ))
-        r["username"] = name_of.get(r["user_id"], "")
+    _audit_batch(admin, RS.REACTIVATE, results, name_of)
+    return {"results": results,
+            "succeeded": sum(1 for r in results if r["success"]),
+            "failed": sum(1 for r in results if not r["success"])}
+
+
+@router.post("/accounts/retry-seats")
+def retry_seats(body: ReactivateIn, admin: CurrentUser = Depends(require_admin)):
+    """预付池：对「等待席位」的账号重新分配席位（在控制台买完席位后用）。"""
+    from app import request_store as RS
+    from app.provisioner import retry_seats as _retry
+
+    name_of = _names(body.kiro_user_ids)
+    results = _retry(body.kiro_user_ids)
+    _audit_batch(admin, RS.SEAT_RETRY, results, name_of)
     return {"results": results,
             "succeeded": sum(1 for r in results if r["success"]),
             "failed": sum(1 for r in results if not r["success"])}
@@ -391,7 +409,7 @@ def manual_link(body: ManualLinkIn, _: CurrentUser = Depends(require_admin)):
     m = Resolver().manual_link(
         kiro_user_id=body.kiro_user_id, feishu_open_id=body.feishu_open_id,
         feishu_name=body.feishu_name, kiro_username=body.kiro_username,
-        kiro_email=body.kiro_email, tier=body.tier,
+        kiro_email=body.kiro_email,
     )
     return m.__dict__
 

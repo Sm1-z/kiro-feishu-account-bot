@@ -31,7 +31,7 @@ def store():
 
 def _mk(store, **kw):
     r = Request(user_open_id=kw.get("user_open_id", "ou_a"), type=APPLY,
-                payload=kw.get("payload", {"username": "zhangsan", "tier": "pro+"}))
+                payload=kw.get("payload", {"username": "zhangsan", "usage_limit": 1000}))
     return store.create(r)
 
 

@@ -8,7 +8,7 @@
 关键设计（设计 02 安全基线）：
 - 防重：先用 RequestStore.transition(pending→approved) 条件更新抢占，失败说明
   已被处理，直接返回，不重复执行。
-- 异步：execute_approved() 跑 AWS provision/upgrade（耗时），由调用方放到后台线程，
+- 异步：execute_approved() 跑 AWS 开通 / 调上限（耗时），由调用方放到后台线程，
   使飞书卡片回调能在 ~3s 内先返回。
 - 锚点：开通成功后用 provision 返回的 UserId 写 DynamoDB 映射（resolver）。
 """
@@ -20,7 +20,7 @@ from app import cards, feishu, provisioner
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import (
-    APPLY, APPROVED, EXECUTED, FAILED, PENDING, QUOTA_INCREASE, REJECTED, UPGRADE,
+    APPLY, APPROVED, EXECUTED, FAILED, LIMIT_CHANGE, PENDING, QUOTA_INCREASE, REJECTED,
     Request, RequestStore,
 )
 from app.resolver import Resolver
@@ -64,8 +64,8 @@ class ApprovalService:
 
         if req.type == APPLY:
             self._exec_apply(req)
-        elif req.type == UPGRADE:
-            self._exec_upgrade(req)
+        elif req.type == LIMIT_CHANGE:
+            self._exec_limit_change(req)
         elif req.type == QUOTA_INCREASE:
             self._exec_quota(req)
 
@@ -76,7 +76,8 @@ class ApprovalService:
         result = provisioner.provision(
             username=p["username"], email=p["email"],
             given_name=p.get("given_name", ""), family_name=p.get("family_name", ""),
-            tier=p["tier"], group_name=p.get("group", settings.kiro_group_name),
+            group_name=p.get("group") or settings.kiro_group_name,
+            usage_limit=p.get("usage_limit"),
         )
         if result.success:
             # 写映射：UserId 锚点 + 主/副自动判定
@@ -86,13 +87,14 @@ class ApprovalService:
                 feishu_name=req.user_name,
                 kiro_username=p["username"],
                 kiro_email=p["email"],
-                tier=p["tier"],
+                usage_limit=p.get("usage_limit"),
                 team=p.get("group", ""),
                 approved_by=req.reviewer_open_id,
             )
             self.requests.update_fields(
                 req.request_id, status=EXECUTED,
-                result={"user_id": result.user_id, "steps": result.steps_succeeded},
+                result={"user_id": result.user_id, "steps": result.steps_succeeded,
+                        "warning": result.warning},
             )
         else:
             self.requests.update_fields(
@@ -100,14 +102,17 @@ class ApprovalService:
                 result={"error": result.error, "error_step": result.error_step},
             )
 
-    def _exec_upgrade(self, req: Request) -> None:
+    def _exec_limit_change(self, req: Request) -> None:
         p = req.payload
-        result = provisioner.upgrade(username=p["username"], tier=p["target_tier"])
+        limit = p["requested_limit"]
+        result = provisioner.set_user_limit(req.kiro_user_id, limit)
         if result.success:
-            if req.kiro_user_id:
-                self.mapping.update_fields(req.kiro_user_id, tier=p["target_tier"])
+            try:
+                self.mapping.update_fields(req.kiro_user_id, usage_limit=limit)
+            except Exception:  # noqa: BLE001 - 快照失败不影响已生效的上限
+                logger.warning("limit_change: mapping snapshot update failed")
             self.requests.update_fields(
-                req.request_id, status=EXECUTED, result={"new_tier": p["target_tier"]})
+                req.request_id, status=EXECUTED, result={"new_limit": limit})
         else:
             self.requests.update_fields(
                 req.request_id, status=FAILED, result={"error": result.error})
@@ -123,7 +128,8 @@ class ApprovalService:
     def notify_after_execution(self, req: Request, reviewer_name: str) -> None:
         """执行后更新审批卡片 + 通知申请人。失败不影响主流程。"""
         ok = req.status == EXECUTED
-        detail = "" if ok else (req.result or {}).get("error", "执行失败")
+        res = req.result or {}
+        detail = res.get("warning", "") if ok else res.get("error", "执行失败")
         try:
             final = cards.build_final_card(req.type, req.user_name, req.payload,
                                            reviewer_name, approved=ok, detail=detail)
@@ -134,7 +140,8 @@ class ApprovalService:
         try:
             user_card = cards.build_user_result_card(
                 req.type, req.payload, success=ok,
-                sign_in_url=settings.kiro_sign_in_url, reason=detail)
+                sign_in_url=settings.kiro_sign_in_url, reason=detail,
+                warning=(req.result or {}).get("warning", "") if ok else "")
             feishu.send_card(req.user_open_id, user_card)
         except Exception:
             logger.exception("通知申请人失败: %s", req.request_id)

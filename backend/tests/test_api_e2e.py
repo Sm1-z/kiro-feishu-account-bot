@@ -47,8 +47,9 @@ def client(monkeypatch):
             KeySchema=[{"AttributeName": "request_id", "KeyType": "HASH"}])
         from fastapi.testclient import TestClient
         from app.main import app
-        # 推审批卡片 mock 掉（不连飞书）
-        with patch("app.routers.request_router.feishu.send_card", return_value="m_1"):
+        # 推审批卡片 mock 掉（不连飞书）；卡片上的积分池现状也 mock 掉（不连 Kiro）
+        with patch("app.routers.request_router.feishu.send_card", return_value="m_1"), \
+             patch("app.routers.request_router._pool_hint", return_value=""):
             yield TestClient(app)
 
 
@@ -80,42 +81,57 @@ def test_non_admin_forbidden(client):
     assert r.status_code == 403
 
 
+def _wait_status(client, status="executed"):
+    req = None
+    for _ in range(50):
+        req = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()[0]
+        if req["status"] == status:
+            break
+        time.sleep(0.05)
+    return req
+
+
 def test_full_apply_approve_flow(client):
-    """完整闭环：申请 → 管理员审批 → 执行 → 映射写入。"""
-    # 1. 用户申请
+    """完整闭环：申请（带上限）→ 管理员审批 → 执行（入池）→ 映射写入 → 我的账号显示池实况。"""
     r = client.post("/api/requests/apply", headers=_auth(USER, "张三"), json={
-        "username": "zhangsan", "email": "li@x.com",
-        "given_name": "De", "family_name": "Li", "group": "team-a", "tier": "pro+"})
+        "username": "zhangsan", "email": "li@x.com", "given_name": "De", "family_name": "Li",
+        "group": "team-a", "usage_limit": 800, "reason": "做大型重构"})
     assert r.status_code == 200, r.text
     rid = r.json()["request_id"]
 
-    # 2. 管理员看到 pending
     pend = client.get("/api/admin/requests?status=pending", headers=_auth(ADMIN, "Admin")).json()
     assert len(pend) == 1 and pend[0]["request_id"] == rid
+    assert pend[0]["payload"]["usage_limit"] == 800
 
-    # 3. 审批通过（后台线程执行，mock provision + 通知）
-    fake = MagicMock(success=True, user_id="test-uid-aaaa",
-                     steps_succeeded=["user_created", "subscription_created"])
-    with patch("app.approval.provisioner.provision", return_value=fake), \
+    fake = MagicMock(success=True, user_id="test-uid-aaaa", warning="",
+                     steps_succeeded=["user_created", "pool_joined", "seat_auto", "limit_set"])
+    with patch("app.approval.provisioner.provision", return_value=fake) as prov, \
          patch("app.approval.feishu.update_card"), \
          patch("app.approval.feishu.send_card"):
         ok = client.post(f"/api/admin/requests/{rid}/approve", headers=_auth(ADMIN, "Admin"))
         assert ok.status_code == 200
-        # 等后台线程
-        for _ in range(50):
-            req = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()[0]
-            if req["status"] == "executed":
-                break
-            time.sleep(0.05)
+        req = _wait_status(client)
     assert req["status"] == "executed"
+    assert prov.call_args.kwargs["usage_limit"] == 800
 
-    # 4. 用户 me 现在能看到账号（映射已写，UserId 锚点）
-    me = client.get("/api/auth/me", headers=_auth(USER, "张三")).json()
-    assert len(me["accounts"]) == 1
+    with patch("app.provisioner.live_status_map",
+               return_value={"test-uid-aaaa": {"status": "SEATED", "direct": True}}), \
+         patch("app.pool.effective_limits", return_value={
+             "test-uid-aaaa": {"limit": 800.0, "scope": "USER", "scope_id": "test-uid-aaaa"}}), \
+         patch("app.usage.get_current_month_usage_by_user",
+               return_value={"test-uid-aaaa": {"credits": 12.5}}):
+        me = client.get("/api/auth/me", headers=_auth(USER, "张三")).json()
     acct = me["accounts"][0]
-    assert acct["kiro_user_id"] == "test-uid-aaaa"
-    assert acct["account_role"] == "primary"
-    assert acct["kiro_username"] == "zhangsan"
+    assert acct["kiro_user_id"] == "test-uid-aaaa" and acct["account_role"] == "primary"
+    assert acct["pool_status"] == "SEATED"
+    assert acct["limit"] == 800.0 and acct["limit_scope"] == "USER"
+    assert acct["month_credits"] == 12.5 and acct["usage_limit"] == 800
+
+
+def test_apply_rejects_invalid_limit(client):
+    r = client.post("/api/requests/apply", headers=_auth(USER, "张三"), json={
+        "username": "zhangsan", "email": "li@x.com", "usage_limit": 0})
+    assert r.status_code == 422
 
 
 def test_apply_duplicate_email_blocked(client):
@@ -124,23 +140,21 @@ def test_apply_duplicate_email_blocked(client):
     MappingStore().put(AccountMapping(kiro_user_id="u0", feishu_open_id="ou_other",
                                       kiro_username="someone", kiro_email="dup@x.com"))
     r = client.post("/api/requests/apply", headers=_auth(USER, "王五"), json={
-        "username": "wangwu", "email": "dup@x.com", "tier": "pro"})
+        "username": "wangwu", "email": "dup@x.com"})
     assert r.status_code == 400
     assert "邮箱" in r.json()["detail"]
 
 
 def test_apply_no_account_quota_limit(client):
-    """不再限制每人账号数：同一用户连续申请超过原配额（2）仍应被接受。"""
+    """不限制每人账号数：已有 3 个账号仍可继续申请。"""
     from app.mapping_store import AccountMapping, MappingStore
     store = MappingStore()
-    # 预置 3 个已有 active 账号（超过原 quota=2）
     for i in range(3):
         store.put(AccountMapping(kiro_user_id=f"u{i}", feishu_open_id=USER,
                                  kiro_username=f"existing{i}", kiro_email=f"e{i}@x.com",
                                  status="active"))
-    # 再申请第 4 个，过去会被「已达账号配额上限」拦截，现在应放行
     r = client.post("/api/requests/apply", headers=_auth(USER, "张三"), json={
-        "username": "zhangsan-extra", "email": "extra@x.com", "tier": "pro max"})
+        "username": "zhangsan-extra", "email": "extra@x.com"})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "pending"
 
@@ -148,10 +162,10 @@ def test_apply_no_account_quota_limit(client):
 def test_approve_dedup_via_api(client):
     """两次审批同一申请，第二次 409。"""
     r = client.post("/api/requests/apply", headers=_auth(USER, "张三"),
-                    json={"username": "zhangsan", "email": "li@x.com", "tier": "pro"})
+                    json={"username": "zhangsan", "email": "li@x.com"})
     rid = r.json()["request_id"]
     with patch("app.approval.provisioner.provision",
-               return_value=MagicMock(success=True, user_id="u1", steps_succeeded=[])), \
+               return_value=MagicMock(success=True, user_id="u1", warning="", steps_succeeded=[])), \
          patch("app.approval.feishu.update_card"), patch("app.approval.feishu.send_card"):
         first = client.post(f"/api/admin/requests/{rid}/approve", headers=_auth(ADMIN, "A"))
         second = client.post(f"/api/admin/requests/{rid}/approve", headers=_auth(ADMIN, "A"))
@@ -159,15 +173,45 @@ def test_approve_dedup_via_api(client):
     assert second.status_code == 409
 
 
-# ---- 管理员停用 / 回收（即时执行 + 逐账号审计）----
-
-def _seed_mapping(uid, username, role="secondary"):
+def _seed_mapping(uid, username, role="secondary", owner=USER, usage_limit=None):
     from app.mapping_store import AccountMapping, MappingStore
     MappingStore().put(AccountMapping(
-        kiro_user_id=uid, feishu_open_id=USER, feishu_name="张三",
+        kiro_user_id=uid, feishu_open_id=owner, feishu_name="张三",
         kiro_username=username, kiro_email=f"{username}@example.com",
-        tier="pro", account_role=role))
+        usage_limit=usage_limit, account_role=role))
 
+
+# ---- 申请调整上限 ----
+
+def test_limit_change_request_and_approve(client):
+    _seed_mapping("u1", "zhangsan", role="primary", usage_limit=500)
+    with patch("app.pool.effective_limit",
+               return_value={"limit": 500.0, "scope": "USER", "scope_id": "u1"}):
+        r = client.post("/api/requests/limit-change", headers=_auth(USER, "张三"),
+                        json={"kiro_user_id": "u1", "requested_limit": 2000, "reason": "月底赶工"})
+    assert r.status_code == 200, r.text
+    rid = r.json()["request_id"]
+    req = client.get("/api/admin/requests?status=pending", headers=_auth(ADMIN, "A")).json()[0]
+    assert req["type"] == "limit_change"
+    assert req["payload"]["current_limit"] == 500 and req["payload"]["requested_limit"] == 2000
+
+    with patch("app.approval.provisioner.set_user_limit",
+               return_value=MagicMock(success=True)) as setl, \
+         patch("app.approval.feishu.update_card"), patch("app.approval.feishu.send_card"):
+        client.post(f"/api/admin/requests/{rid}/approve", headers=_auth(ADMIN, "A"))
+        done = _wait_status(client)
+    assert done["status"] == "executed"
+    setl.assert_called_once_with("u1", 2000)
+
+
+def test_limit_change_rejects_foreign_account(client):
+    _seed_mapping("u1", "lisi", owner="ou_other")
+    r = client.post("/api/requests/limit-change", headers=_auth(USER, "张三"),
+                    json={"kiro_user_id": "u1", "requested_limit": 2000})
+    assert r.status_code == 404
+
+
+# ---- 管理员停用 / 回收 / 恢复（即时执行 + 逐账号审计）----
 
 def test_deactivate_requires_admin(client):
     r = client.post("/api/admin/accounts/deactivate",
@@ -175,14 +219,7 @@ def test_deactivate_requires_admin(client):
     assert r.status_code == 403
 
 
-def test_deactivate_rejects_bad_mode(client):
-    r = client.post("/api/admin/accounts/deactivate",
-                    json={"kiro_user_ids": ["u1"], "mode": "whenever"},
-                    headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 422
-
-
-def test_deactivate_default_end_of_period_and_audited(client):
+def test_deactivate_removes_from_pool_and_audited(client):
     _seed_mapping("u1", "zhangsan-2")
     with patch("app.provisioner.deactivate",
                return_value=[{"user_id": "u1", "success": True, "error": ""}]) as d, \
@@ -191,21 +228,18 @@ def test_deactivate_default_end_of_period_and_audited(client):
                         json={"kiro_user_ids": ["u1"]}, headers=_auth(ADMIN, "Admin"))
     assert r.status_code == 200
     body = r.json()
-    assert body["mode"] == "end_of_period" and body["recycle"] is False
-    assert body["succeeded"] == 1 and body["failed"] == 0
+    assert body["recycle"] is False and body["succeeded"] == 1
     assert body["results"][0]["username"] == "zhangsan-2"
-    d.assert_called_once_with(["u1"], "end_of_period")
+    d.assert_called_once_with(["u1"])
     bc.assert_not_called()
-    # 审计落 requests 表：type=deactivate / executed / 带 mode 与用户名
     reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
     audit = [q for q in reqs if q["type"] == "deactivate"]
-    assert len(audit) == 1
-    assert audit[0]["status"] == "executed"
+    assert len(audit) == 1 and audit[0]["status"] == "executed"
     assert audit[0]["kiro_user_id"] == "u1"
-    assert audit[0]["payload"] == {"mode": "end_of_period", "username": "zhangsan-2"}
+    assert audit[0]["payload"] == {"username": "zhangsan-2"}
 
 
-def test_recycle_immediate_routes_to_bulk_cancel_and_marks_failures(client):
+def test_recycle_routes_to_bulk_cancel_and_marks_failures(client):
     _seed_mapping("u1", "a-2")
     _seed_mapping("u2", "b-2")
     results = [{"user_id": "u1", "success": True, "error": ""},
@@ -213,160 +247,167 @@ def test_recycle_immediate_routes_to_bulk_cancel_and_marks_failures(client):
     with patch("app.provisioner.bulk_cancel", return_value=results) as bc, \
          patch("app.provisioner.deactivate") as d:
         r = client.post("/api/admin/accounts/deactivate",
-                        json={"kiro_user_ids": ["u1", "u2"], "mode": "immediate", "recycle": True},
+                        json={"kiro_user_ids": ["u1", "u2"], "recycle": True},
                         headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
     body = r.json()
     assert body["succeeded"] == 1 and body["failed"] == 1
-    bc.assert_called_once_with(["u1", "u2"], "immediate")
+    bc.assert_called_once_with(["u1", "u2"])
     d.assert_not_called()
     reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
     audit = {q["kiro_user_id"]: q for q in reqs if q["type"] == "recycle"}
     assert audit["u1"]["status"] == "executed"
-    assert audit["u2"]["status"] == "failed"
-    assert "403" in audit["u2"]["result"]["error"]
+    assert audit["u2"]["status"] == "failed" and "403" in audit["u2"]["result"]["error"]
 
 
-def test_reactivate_endpoint_audited(client):
+def test_reactivate_and_retry_seats_audited(client):
     _seed_mapping("u1", "zhangsan-2")
-    with patch("app.provisioner.reactivate",
-               return_value=[{"user_id": "u1", "success": True, "error": "", "tier": "pro"}]) as ra:
+    with patch("app.provisioner.reactivate", return_value=[
+            {"user_id": "u1", "success": True, "error": "", "warning": "没有空余席位"}]):
         r = client.post("/api/admin/accounts/reactivate",
                         json={"kiro_user_ids": ["u1"]}, headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
-    assert r.json()["succeeded"] == 1 and r.json()["results"][0]["username"] == "zhangsan-2"
-    ra.assert_called_once_with(["u1"])
+    assert r.json()["succeeded"] == 1
+    with patch("app.provisioner.retry_seats", return_value=[
+            {"user_id": "u1", "success": True, "error": ""}]) as rs:
+        r2 = client.post("/api/admin/accounts/retry-seats",
+                         json={"kiro_user_ids": ["u1"]}, headers=_auth(ADMIN, "Admin"))
+    assert r2.json()["succeeded"] == 1
+    rs.assert_called_once_with(["u1"])
     reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
-    audit = [q for q in reqs if q["type"] == "reactivate"]
-    assert len(audit) == 1 and audit[0]["status"] == "executed"
-    assert audit[0]["payload"] == {"username": "zhangsan-2", "tier": "pro"}
+    re_audit = [q for q in reqs if q["type"] == "reactivate"][0]
+    assert re_audit["result"] == {"ok": True, "warning": "没有空余席位"}
+    assert [q for q in reqs if q["type"] == "seat_retry"][0]["status"] == "executed"
 
 
-# ---- 按人费用 / 额度列（Kiro Enterprise 计费直读）----
+# ---- 账号总览（积分池实况 + 生效上限 + 本月用量）----
 
-BILLING_OK = {
-    "billing_synced": True, "billing_error": "", "plan_code": "KIRO_ENTERPRISE_POWER",
-    "plan_start": "2026-09-19", "current_charges": 200.0, "currency": "USD",
-    "account_status": "ACTIVE", "pending_plan": None, "pending_scheduled": None,
-    "credit_used": 1234.5, "credit_limit": 10000.0, "credit_unit": "INVOCATIONS",
-    "overage_charges": 3.2, "overage_rate": 0.04, "has_usage_entry": True,
-}
+MONTH_USAGE = {"u1": {"credits": 400.0, "overage": 0.0, "messages": 73, "active_days": 3,
+                      "last_active": "2026-11-26"}}
 
 
-MONTH_USAGE = {"u1": {"credits": 89.46, "overage": 25.0, "messages": 73, "active_days": 1, "last_active": "2026-11-03"}}
-
-
-def test_accounts_include_billing_fields(client):
-    _seed_mapping("u1", "zhangsan", role="primary")
-    _seed_mapping("u2", "zhangsan-2")
-    with patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}) as gb, \
-         patch("app.provisioner.live_subscription_map", return_value={}), \
+def _accounts(client, live=None, limits=None, month=None, force=False):
+    with patch("app.provisioner.live_status_map", return_value=live or {}) as lv, \
+         patch("app.pool.effective_limits", return_value=limits or {}) as el, \
          patch("app.usage.get_usage_by_user", return_value={}), \
-         patch("app.usage.get_current_month_usage_by_user", return_value=MONTH_USAGE) as gm:
-        r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
+         patch("app.usage.get_current_month_usage_by_user", return_value=month or {}) as gm:
+        r = client.get(f"/api/admin/accounts{'?force=true' if force else ''}",
+                       headers=_auth(ADMIN, "Admin"))
+    return r, lv, el, gm
+
+
+def test_accounts_include_pool_fields(client):
+    _seed_mapping("u1", "zhangsan", role="primary", usage_limit=1000)
+    _seed_mapping("u2", "zhangsan-2")
+    _seed_mapping("u3", "zhangsan-3")
+    r, *_ = _accounts(client,
+                      live={"u1": {"status": "SEATED", "direct": True},
+                            "u2": {"status": "AWAITING_SEAT", "direct": True}},
+                      limits={"u1": {"limit": 1000.0, "scope": "USER", "scope_id": "u1"},
+                              "u2": None},
+                      month=MONTH_USAGE)
     assert r.status_code == 200
     rows = {x["kiro_user_id"]: x for x in r.json()}
-    # 调用传入全部账号 id，且透传 force
-    called_ids = gb.call_args.args[0]
-    assert set(called_ids) == {"u1", "u2"} and gb.call_args.kwargs["force"] is False
-    assert gm.call_args.kwargs["force"] is False
-    u1 = rows["u1"]
-    assert u1["billing_synced"] is True
-    assert u1["billing_plan_code"] == "KIRO_ENTERPRISE_POWER"
-    assert u1["billing_current_charges"] == 200.0 and u1["billing_currency"] == "USD"
-    assert u1["billing_credit_limit"] == 10000.0 and u1["billing_overage_rate"] == 0.04
-    # 本月已用 / 超额来自报表月聚合（活动口径），不是计费服务的 currentUsage
-    assert u1["billing_credit_used"] == 89.46 and u1["billing_credit_used_source"] == "athena_mtd"
-    assert u1["billing_overage_credits"] == 25.0
-    assert u1["billing_overage_charges"] == 1.0           # 25 × 0.04 预估
-    assert u1["billing_reported_credit_used"] == 1234.5 and u1["billing_reported_overage_charges"] == 3.2
-    assert u1["usage_month_messages"] == 73 and u1["usage_month_active_days"] == 1
-    assert u1["usage_month_last_active"] == "2026-11-03"
-    assert u1["billing_account_status"] == "ACTIVE"
-    # 报表可用但该用户本月无记录 → 0；没有计费数据 → synced=False、套餐字段 None，列表不中断
-    u2 = rows["u2"]
-    assert u2["billing_synced"] is False and u2["billing_error"] == "unavailable"
-    assert u2["billing_current_charges"] is None and u2["billing_credit_limit"] is None
-    assert u2["billing_credit_used"] == 0.0 and u2["billing_overage_credits"] == 0.0
-    assert u2["usage_month_messages"] == 0 and u2["usage_month_last_active"] is None
-    assert u2["billing_overage_charges"] == 0.0           # 无单价时用默认 0.04 × 0
+    u1, u2, u3 = rows["u1"], rows["u2"], rows["u3"]
+    assert u1["pool_status"] == "SEATED" and u1["limit"] == 1000.0 and u1["limit_scope"] == "USER"
+    assert u1["month_credits"] == 400.0 and u1["limit_used_pct"] == 40.0
+    assert u1["usage_limit"] == 1000
+    assert u2["pool_status"] == "AWAITING_SEAT"
+    assert u2["limit"] is None and u2["limit_scope"] == "NONE"  # 无上限
+    assert u2["month_credits"] == 0.0  # 报表可用但该用户本月没用
+    assert u3["pool_status"] is None  # 不在池里
+    assert u3["limit_scope"] is None  # 查询失败 / 未知
+    assert "billing_current_charges" not in u1 and "tier" not in u1
 
 
-def test_accounts_month_usage_unavailable_gives_none(client):
-    """报表不可用（返回 {}）→ 本月已用/超额为 None 而不是 0，前端显示 —。"""
-    _seed_mapping("u1", "zhangsan")
-    with patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}), \
-         patch("app.provisioner.live_subscription_map", return_value={}), \
+def test_accounts_degrade_when_sources_fail(client):
+    _seed_mapping("u1", "zhangsan", role="primary")
+    with patch("app.provisioner.live_status_map", side_effect=RuntimeError("down")), \
+         patch("app.pool.effective_limits", side_effect=RuntimeError("down")), \
          patch("app.usage.get_usage_by_user", return_value={}), \
          patch("app.usage.get_current_month_usage_by_user", return_value={}):
         r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
     row = r.json()[0]
-    assert row["billing_credit_used"] is None and row["billing_credit_used_source"] is None
-    assert row["billing_overage_charges"] is None
-    assert row["usage_month_messages"] is None and row["usage_month_active_days"] is None
-    assert row["billing_credit_limit"] == 10000.0   # 额度仍来自计费服务
+    assert row["live_synced"] is False and row["pool_status"] is None
+    assert row["limit"] is None and row["month_credits"] is None
 
 
-def test_accounts_force_passes_through_to_billing(client):
-    _seed_mapping("u1", "zhangsan")
-    with patch("app.billing.get_billing_by_user", return_value={}) as gb, \
-         patch("app.provisioner.live_subscription_map", return_value={}), \
-         patch("app.usage.get_usage_by_user", return_value={}), \
-         patch("app.usage.get_current_month_usage_by_user", return_value={}) as gm:
-        r = client.get("/api/admin/accounts?force=true", headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
-    assert gb.call_args.kwargs["force"] is True and gm.call_args.kwargs["force"] is True
+def test_accounts_force_passes_through(client):
+    _seed_mapping("u1", "zhangsan", role="primary")
+    _, lv, el, gm = _accounts(client, force=True)
+    lv.assert_called_once_with(force=True)
+    assert el.call_args.kwargs["force"] is True
+    gm.assert_called_once_with(force=True)
 
 
-def test_accounts_billing_total_failure_degrades(client):
-    """计费服务整体不可用（返回 {}）→ 账号列表照常，billing 字段全部 None。"""
-    _seed_mapping("u1", "zhangsan")
-    with patch("app.billing.get_billing_by_user", return_value={}), \
-         patch("app.provisioner.live_subscription_map", return_value={}), \
-         patch("app.usage.get_usage_by_user", return_value={}):
-        r = client.get("/api/admin/accounts", headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
-    assert r.json()[0]["billing_synced"] is False
-    assert r.json()[0]["billing_current_charges"] is None
-
-
-def test_billing_history_endpoint_uses_athena_month(client):
-    month = {"u1": {"credits": 196.39, "overage": 50.0, "messages": 120, "active_days": 4, "last_active": "2026-10-08"}}
+def test_usage_history_endpoint(client):
+    month = {"u1": {"credits": 512.3, "overage": 0.0, "messages": 120, "active_days": 9,
+                    "last_active": "2026-10-30"}}
     with patch("app.usage._enabled", return_value=True), \
-         patch("app.usage.get_month_usage_by_user", return_value=month) as gm, \
-         patch("app.billing.get_billing_by_user", return_value={"u1": BILLING_OK}):
-        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
+         patch("app.usage.get_month_usage_by_user", return_value=month) as gm:
+        r = client.get("/api/admin/accounts/u1/usage-history?year=2026&month=10",
                        headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
     body = r.json()
     gm.assert_called_once_with(2026, 10)
-    assert body["source"] == "athena" and body["available"] is True and body["has_usage_entry"] is True
-    assert body["credit_used"] == 196.39 and body["overage_credits"] == 50.0
-    assert body["overage_charges_est"] == 2.0 and body["overage_rate"] == 0.04
-    assert body["messages"] == 120 and body["active_days"] == 4 and body["last_active"] == "2026-10-08"
-    assert body["credit_limit"] == 10000.0 and body["plan_code"] == "KIRO_ENTERPRISE_POWER"
-
-
-def test_billing_history_no_entry_and_unavailable(client):
-    with patch("app.usage._enabled", return_value=True), \
-         patch("app.usage.get_month_usage_by_user", return_value={}), \
-         patch("app.billing.get_billing_by_user", return_value={}):
-        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=9",
-                       headers=_auth(ADMIN, "Admin"))
-    assert r.status_code == 200
-    assert r.json()["has_usage_entry"] is False and r.json()["credit_used"] is None
-    assert r.json()["overage_rate"] == 0.04   # 默认单价兜底
-    with patch("app.usage._enabled", return_value=False), \
-         patch("app.usage.get_month_usage_by_user") as gm, \
-         patch("app.billing.get_billing_by_user", return_value={}):
-        r = client.get("/api/admin/accounts/u1/billing-history?year=2026&month=9",
-                       headers=_auth(ADMIN, "Admin"))
-    assert r.json()["available"] is False and r.json()["source"] is None
-    gm.assert_not_called()
-
-
-def test_billing_history_validation(client):
-    assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=13",
+    assert body["available"] is True and body["has_usage_entry"] is True
+    assert body["credit_used"] == 512.3 and body["active_days"] == 9
+    assert client.get("/api/admin/accounts/u1/usage-history?year=2026&month=13",
                       headers=_auth(ADMIN, "Admin")).status_code == 400
-    assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
-                      headers=_auth(USER, "张三")).status_code == 403
+
+
+# ---- 积分池总览 / 上限管理 ----
+
+def test_pool_overview_degrades_per_part(client):
+    from app.pool import PoolContext
+    ctx = PoolContext("111122223333", "us-east-1", "arn:i", "arn:p", "POSTPAID")
+    with patch("app.pool.get_context", return_value=ctx), \
+         patch("app.pool.overview", return_value={"total_left": 253.0}), \
+         patch("app.pool.seat_status", return_value={"users": {"u1": {}}, "seated": 1}), \
+         patch("app.pool.profile_limit", side_effect=RuntimeError("limits down")), \
+         patch("app.pool.list_credit_purchases", return_value=[]), \
+         patch("app.quotas.get_kiro_quotas", return_value={"onboarding_cap": None}):
+        body = client.get("/api/admin/pool", headers=_auth(ADMIN, "Admin")).json()
+    assert body["context"]["payment_model"] == "POSTPAID"
+    assert body["balance"]["total_left"] == 253.0
+    assert body["seats"] == {"seated": 1}  # 不把每个用户的明细带出去
+    assert body["profile_limit"] is None
+    assert any("profile_limit" in e for e in body["errors"])
+
+
+def test_pool_overview_requires_admin(client):
+    assert client.get("/api/admin/pool", headers=_auth(USER, "张三")).status_code == 403
+
+
+def test_set_limit_user_audited_and_snapshot(client):
+    _seed_mapping("u1", "zhangsan", role="primary")
+    with patch("app.pool.effective_limit", return_value=None), \
+         patch("app.pool.set_limit") as setl:
+        r = client.post("/api/admin/limits", headers=_auth(ADMIN, "Admin"),
+                        json={"scope": "USER", "scope_id": "u1", "usage_limit": 300})
+    assert r.status_code == 200, r.text
+    setl.assert_called_once_with("USER", "u1", 300)
+    from app.mapping_store import MappingStore
+    assert MappingStore().get("u1").usage_limit == 300
+    reqs = client.get("/api/admin/requests", headers=_auth(ADMIN, "Admin")).json()
+    audit = [q for q in reqs if q["type"] == "limit_set"][0]
+    assert audit["payload"]["to"] == "300" and audit["payload"]["username"] == "zhangsan"
+
+
+def test_set_limit_pool_remove_and_validation(client):
+    from app.pool import PoolError
+    with patch("app.pool.profile_limit", return_value=150.0), \
+         patch("app.pool.set_limit") as setl:
+        r = client.post("/api/admin/limits", headers=_auth(ADMIN, "Admin"),
+                        json={"scope": "POOL", "usage_limit": None})
+    assert r.status_code == 200
+    setl.assert_called_once_with("POOL", "", None)
+    with patch("app.pool.profile_limit", return_value=None), \
+         patch("app.pool.set_limit", side_effect=PoolError("超过了积分池当前的 credits 总量")):
+        r2 = client.post("/api/admin/limits", headers=_auth(ADMIN, "Admin"),
+                         json={"scope": "POOL", "usage_limit": 99999})
+    assert r2.status_code == 400 and "credits 总量" in r2.json()["detail"]
+    r3 = client.post("/api/admin/limits", headers=_auth(ADMIN, "Admin"),
+                     json={"scope": "USER", "usage_limit": 10})
+    assert r3.status_code == 400  # USER 缺 scope_id
+    r4 = client.post("/api/admin/limits", headers=_auth(ADMIN, "Admin"),
+                     json={"scope": "GROUP", "scope_id": "g1", "usage_limit": 10})
+    assert r4.status_code == 422  # 组上限暂不开放
+

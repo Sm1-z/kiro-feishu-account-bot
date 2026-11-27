@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Kiro 账号管理平台 v2", version="2.0.0-dev")
+app = FastAPI(title="Kiro 账号管理平台（积分池版）", version="3.0.0-dev")
 
 app.add_middleware(
     CORSMiddleware,

@@ -15,11 +15,11 @@
     request_id    (PK)   uuid
     user_open_id         申请人飞书 open_id
     user_name            申请人飞书姓名（快照）
-    type                 apply / upgrade / quota_increase / overage_cap / deactivate / recycle / reactivate
+    type                 apply / limit_change / quota_increase / limit_set / deactivate / recycle / reactivate / seat_retry
     status               pending / approved / executed / failed / rejected
     payload              申请详情（dict）
     result               执行结果（dict：user_id+steps 或 error）
-    kiro_user_id         升级类申请关联的账号锚点
+    kiro_user_id         提额类申请 / 管理员动作关联的账号锚点
     reviewer_open_id     审批人
     review_comment
     notify_message_ids   飞书审批卡片 message_id 列表（审批后更新卡片用）
@@ -44,13 +44,14 @@ FAILED = "failed"
 REJECTED = "rejected"
 
 # 类型常量
-APPLY = "apply"
-UPGRADE = "upgrade"
+APPLY = "apply"                  # 员工申请开通（加入积分池）
+LIMIT_CHANGE = "limit_change"    # 员工申请调整个人用量上限（审批后 SetUsageLimit）
 QUOTA_INCREASE = "quota_increase"
-OVERAGE_CAP = "overage_cap"  # 管理员调高 Overages 上限（即时执行，无审批流，纯审计记录）
-DEACTIVATE = "deactivate"    # 管理员停用订阅（保留 IDC 用户/映射；即时执行，纯审计记录）
-RECYCLE = "recycle"          # 管理员回收账号（退订 + 删 IDC 用户 + 删映射；即时执行，纯审计记录）
-REACTIVATE = "reactivate"    # 管理员恢复订阅（撤销月底停用：对 CANCELLED 账号重新订阅；即时执行，纯审计记录）
+LIMIT_SET = "limit_set"          # 管理员直接设置 / 删除上限（用户 / profile 默认；即时执行，纯审计记录）
+DEACTIVATE = "deactivate"        # 管理员停用 = 移出积分池（保留 IDC 用户 / 映射；即时执行，纯审计记录）
+RECYCLE = "recycle"              # 管理员回收（移出池 + 删 IDC 用户 + 删映射；即时执行，纯审计记录）
+REACTIVATE = "reactivate"        # 管理员恢复 = 重新加入积分池（即时执行，纯审计记录）
+SEAT_RETRY = "seat_retry"        # 管理员对「等待席位」账号重新分配席位（预付池；纯审计记录）
 
 
 def _now() -> int:

@@ -1,20 +1,15 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Kiro Service Quotas（Overages 超额上限）只读查询。
+"""Kiro Service Quotas 只读查询（积分池相关的两项）。
 
-Kiro 企业版支持通过 AWS Service Quotas 控制 profile 内每个订阅的超额上限
-（quota: "Maximum allowed overage per Kiro profile"，单位 USD）。
-本模块查询该 quota 当前值，供管理页展示成本敞口。
+| QuotaCode | 名称 | 对积分池的意义 |
+|-----------|------|----------------|
+| L-295A3FFB | Maximum allowed users to onboard per Kiro profile | 可接入的用户数上限；后付池到上限后新成员显示「等待席位」 |
+| L-05AF9163 | Maximum allowed credits to purchase in month | 每月最多可购买的追加 credits |
 
-注意：该上限是 profile 级单一值（非按用户），且 RequestServiceQuotaIncrease
-只接受大于当前值的请求（实测 IllegalArgumentException），调低需走 AWS Support
-case——调高入口做在应用内（含前置校验 + 审计落 requests 表），调低只能提示走 Support。
-
-设计要点（与 app.usage 一致）：
-- **只读、降级安全**：查询失败 / 无权限 → 返回 None，管理页显示 —，不阻断页面。
-- **TTL 缓存**：quota 值变化频率极低，缓存 10 分钟，避免每次开页面都打 API。
-- 凭证走 app.aws 默认链（Role，无 AK/SK）。
+只读、降级安全：查询失败该项为 None，不阻断页面；值变化频率低，缓存 10 分钟。
+提额在 Service Quotas 控制台发起（管理页给出链接）。
 """
 from __future__ import annotations
 
@@ -29,118 +24,53 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Kiro 在 Service Quotas 的服务码与 overage quota 码（实测验证，见 docs）
 QUOTA_SERVICE_CODE = "kiro"
-OVERAGE_QUOTA_CODE = "L-75434B0B"
+QUOTAS = {
+    "onboarding_cap": "L-295A3FFB",
+    "monthly_purchase_cap": "L-05AF9163",
+}
 
-_CACHE_TTL = 600  # 秒
+_CACHE_TTL = 600
 _cache: dict = {"ts": 0.0, "data": None}
 _lock = threading.Lock()
 
 
-def _fetch_overage_cap() -> dict:
-    """查 quota 当前值。账号无 applied 值时回退查服务默认值。"""
-    client = get_session().client("service-quotas", region_name=settings.aws_region)
+def console_url(quota_code: str) -> str:
+    # Kiro 的 quota 只在 us-east-1 的 Service Quotas 控制台可见
+    return (f"https://us-east-1.console.aws.amazon.com/servicequotas/home/services/"
+            f"{QUOTA_SERVICE_CODE}/quotas/{quota_code}")
+
+
+def _fetch_one(client, code: str) -> dict | None:
     try:
-        quota = client.get_service_quota(
-            ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=OVERAGE_QUOTA_CODE
-        )["Quota"]
+        quota = client.get_service_quota(ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=code)["Quota"]
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "NoSuchResourceException":
             raise
         quota = client.get_aws_default_service_quota(
-            ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=OVERAGE_QUOTA_CODE
-        )["Quota"]
-    return {
-        "value": quota.get("Value"),
-        "quota_name": quota.get("QuotaName", ""),
-        "adjustable": quota.get("Adjustable", False),
-        "region": settings.aws_region,
-        "console_url": (
-            f"https://{settings.aws_region}.console.aws.amazon.com/servicequotas/home/"
-            f"services/{QUOTA_SERVICE_CODE}/quotas/{OVERAGE_QUOTA_CODE}"
-        ),
-    }
+            ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=code)["Quota"]
+    return {"code": code, "name": quota.get("QuotaName", ""), "value": quota.get("Value"),
+            "adjustable": quota.get("Adjustable", False), "console_url": console_url(code)}
 
 
-def get_overage_cap(force: bool = False) -> dict | None:
-    """Overage 上限信息（USD/订阅），带 TTL 缓存。失败返回 None（降级）。"""
+def get_kiro_quotas(force: bool = False) -> dict:
+    """{key: {code, name, value, adjustable, console_url} 或 None}，带 TTL 缓存。"""
     now = time.time()
     with _lock:
-        if not force and (now - _cache["ts"]) < _CACHE_TTL and _cache["data"] is not None:
+        if not force and _cache["data"] is not None and now - _cache["ts"] < _CACHE_TTL:
             return _cache["data"]
     try:
-        data = _fetch_overage_cap()
-        with _lock:
-            _cache["ts"], _cache["data"] = time.time(), data
-        return data
-    except Exception:
-        logger.exception("查询 Kiro overage quota 失败，降级为 None")
-        return _cache["data"]
-
-
-# ---------------------------------------------------------------------------
-# 调高（increase-only）
-# ---------------------------------------------------------------------------
-
-# 单次最多调高为当前值的 N 倍，防误触把成本敞口一次拉爆
-MAX_INCREASE_FACTOR = 2
-
-
-def get_pending_cap_request() -> dict | None:
-    """审批中的 quota 调整请求（PENDING/CASE_OPENED）。无则 None。不缓存——提交后要立刻看到。"""
-    client = get_session().client("service-quotas", region_name=settings.aws_region)
-    resp = client.list_requested_service_quota_change_history_by_quota(
-        ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=OVERAGE_QUOTA_CODE
-    )
-    for r in resp.get("RequestedQuotas", []):
-        if r.get("Status") in ("PENDING", "CASE_OPENED"):
-            return {
-                "desired_value": r.get("DesiredValue"),
-                "status": r.get("Status"),
-                "requested_at": r.get("Created").isoformat() if r.get("Created") else "",
-            }
-    return None
-
-
-def request_cap_increase(desired_value: float) -> dict:
-    """发起调高。校验失败/API 拒绝抛 ValueError（含用户可读信息）。
-
-    幂等考虑：Service Quotas 对同一 quota 已有 pending 请求时会拒绝新请求，
-    这里先查 pending 提前给出友好提示。
-    """
-    current = get_overage_cap(force=True)
-    if current is None:
-        raise ValueError("无法获取当前上限值，请稍后重试")
-    cur_val = current["value"]
-    if desired_value <= cur_val:
-        raise ValueError(
-            f"新上限必须大于当前值 ${cur_val:g}。上限只可调高；调低需联系 AWS Support。"
-        )
-    if desired_value > cur_val * MAX_INCREASE_FACTOR:
-        raise ValueError(
-            f"单次最多调高至当前值的 {MAX_INCREASE_FACTOR} 倍（${cur_val * MAX_INCREASE_FACTOR:g}）。"
-            f"如需更高请分次申请。"
-        )
-    pending = get_pending_cap_request()
-    if pending:
-        raise ValueError(
-            f"已有一个审批中的调整请求（目标 ${pending['desired_value']:g}），请等其完成后再提交。"
-        )
-    client = get_session().client("service-quotas", region_name=settings.aws_region)
-    try:
-        resp = client.request_service_quota_increase(
-            ServiceCode=QUOTA_SERVICE_CODE, QuotaCode=OVERAGE_QUOTA_CODE,
-            DesiredValue=float(desired_value),
-        )
-    except ClientError as exc:
-        raise ValueError(f"申请失败: {exc.response['Error']['Message']}") from exc
-    rq = resp["RequestedQuota"]
-    # 让下次读取拿到新值（小额调整通常秒批）
+        client = get_session().client("service-quotas", region_name=settings.aws_region)
+    except Exception:  # noqa: BLE001
+        logger.exception("service-quotas client 不可用")
+        return {k: None for k in QUOTAS}
+    data = {}
+    for key, code in QUOTAS.items():
+        try:
+            data[key] = _fetch_one(client, code)
+        except Exception:  # noqa: BLE001
+            logger.warning("查询 Kiro quota %s 失败，降级为 None", code)
+            data[key] = None
     with _lock:
-        _cache["ts"] = 0.0
-    return {
-        "desired_value": rq.get("DesiredValue"),
-        "status": rq.get("Status", ""),
-        "request_id": rq.get("Id", ""),
-    }
+        _cache["ts"], _cache["data"] = time.time(), data
+    return data

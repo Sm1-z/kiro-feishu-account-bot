@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.config import settings  # noqa: E402
 from app.mapping_store import MappingStore, PRIMARY, SECONDARY  # noqa: E402
 from app.request_store import (  # noqa: E402
-    APPLY, APPROVED, EXECUTED, FAILED, PENDING, UPGRADE, Request, RequestStore,
+    APPLY, APPROVED, EXECUTED, FAILED, LIMIT_CHANGE, PENDING, Request, RequestStore,
 )
 
 REGION = settings.aws_region
@@ -55,7 +55,7 @@ def stores():
 
 def _apply_req(svc, **payload):
     p = {"username": "zhangsan", "email": "l@x.com", "given_name": "De",
-         "family_name": "Li", "tier": "pro+", "group": "team-a"}
+         "family_name": "Li", "usage_limit": 800, "group": "team-a"}
     p.update(payload)
     return svc.requests.create(Request(user_open_id="ou_li", user_name="张三",
                                        type=APPLY, payload=p))
@@ -75,19 +75,24 @@ def test_execute_apply_success_writes_mapping(stores):
     req = _apply_req(svc)
     svc.claim_approve(req.request_id, "ou_admin")
 
-    fake = MagicMock(success=True, user_id="test-uid-aaaa",
-                     steps_succeeded=["user_created", "subscription_created"])
-    with patch("app.approval.provisioner.provision", return_value=fake):
+    fake = MagicMock(success=True, user_id="test-uid-aaaa", warning="",
+                     steps_succeeded=["user_created", "pool_joined", "seat_auto", "limit_set"])
+    with patch("app.approval.provisioner.provision", return_value=fake) as prov:
         done = svc.execute_approved(req.request_id)
 
     assert done.status == EXECUTED
     assert done.result["user_id"] == "test-uid-aaaa"
+    # 申请里的上限透传给开通流程；没有 tier 参数
+    kwargs = prov.call_args.kwargs
+    assert kwargs["usage_limit"] == 800 and "tier" not in kwargs
+    assert kwargs["group_name"] == "team-a"
     # 映射已写入，UserId 为锚点，首账号为 primary
     m = svc.mapping.get("test-uid-aaaa")
     assert m is not None
     assert m.feishu_open_id == "ou_li"
     assert m.account_role == PRIMARY
     assert m.kiro_username == "zhangsan"
+    assert m.usage_limit == 800
 
 
 def test_second_account_is_secondary(stores):
@@ -97,13 +102,13 @@ def test_second_account_is_secondary(stores):
     r1 = _apply_req(svc, username="zhangsan")
     svc.claim_approve(r1.request_id, "ou_admin")
     with patch("app.approval.provisioner.provision",
-               return_value=MagicMock(success=True, user_id="u1", steps_succeeded=[])):
+               return_value=MagicMock(success=True, user_id="u1", warning="", steps_succeeded=[])):
         svc.execute_approved(r1.request_id)
     # 再开通副账号
     r2 = _apply_req(svc, username="zhangsan-new1", email="l2@x.com")
     svc.claim_approve(r2.request_id, "ou_admin")
     with patch("app.approval.provisioner.provision",
-               return_value=MagicMock(success=True, user_id="u2", steps_succeeded=[])):
+               return_value=MagicMock(success=True, user_id="u2", warning="", steps_succeeded=[])):
         svc.execute_approved(r2.request_id)
 
     assert svc.mapping.get("u1").account_role == PRIMARY
@@ -124,18 +129,57 @@ def test_execute_apply_failure_no_mapping(stores):
     assert svc.mapping.all_usernames() == set()
 
 
-def test_execute_upgrade_updates_tier(stores):
-    """升级成功 → 同步映射 tier。"""
+def test_execute_apply_awaiting_seat_keeps_warning(stores):
+    """预付池没有空余席位：开通成功但带 warning，结果里保留给通知卡片用。"""
     svc = stores
-    # 先有一个账号映射
-    from app.mapping_store import AccountMapping
-    svc.mapping.put(AccountMapping(kiro_user_id="u1", feishu_open_id="ou_li",
-                                   kiro_username="zhangsan", tier="pro", account_role=PRIMARY))
-    req = svc.requests.create(Request(
-        user_open_id="ou_li", user_name="张三", type=UPGRADE,
-        kiro_user_id="u1", payload={"username": "zhangsan", "target_tier": "power"}))
+    req = _apply_req(svc)
     svc.claim_approve(req.request_id, "ou_admin")
-    with patch("app.approval.provisioner.upgrade", return_value=MagicMock(success=True)):
+    fake = MagicMock(success=True, user_id="u9", warning="没有空余席位",
+                     steps_succeeded=["pool_joined", "awaiting_seat"])
+    with patch("app.approval.provisioner.provision", return_value=fake):
         done = svc.execute_approved(req.request_id)
     assert done.status == EXECUTED
-    assert svc.mapping.get("u1").tier == "power"
+    assert done.result["warning"] == "没有空余席位"
+
+
+def test_apply_without_limit_passes_none(stores):
+    svc = stores
+    req = _apply_req(svc, usage_limit=None)
+    svc.claim_approve(req.request_id, "ou_admin")
+    fake = MagicMock(success=True, user_id="u3", warning="", steps_succeeded=[])
+    with patch("app.approval.provisioner.provision", return_value=fake) as prov:
+        svc.execute_approved(req.request_id)
+    assert prov.call_args.kwargs["usage_limit"] is None
+    assert svc.mapping.get("u3").usage_limit is None
+
+
+def test_execute_limit_change_sets_limit_and_snapshot(stores):
+    """调整上限通过 → SetUsageLimit(USER) → 映射快照同步。"""
+    svc = stores
+    from app.mapping_store import AccountMapping
+    svc.mapping.put(AccountMapping(kiro_user_id="u1", feishu_open_id="ou_li",
+                                   kiro_username="zhangsan", usage_limit=500, account_role=PRIMARY))
+    req = svc.requests.create(Request(
+        user_open_id="ou_li", user_name="张三", type=LIMIT_CHANGE,
+        kiro_user_id="u1", payload={"username": "zhangsan", "requested_limit": 2000,
+                                    "current_limit": 500}))
+    svc.claim_approve(req.request_id, "ou_admin")
+    with patch("app.approval.provisioner.set_user_limit",
+               return_value=MagicMock(success=True)) as setl:
+        done = svc.execute_approved(req.request_id)
+    assert done.status == EXECUTED
+    setl.assert_called_once_with("u1", 2000)
+    assert svc.mapping.get("u1").usage_limit == 2000
+
+
+def test_execute_limit_change_failure_marks_failed(stores):
+    svc = stores
+    req = svc.requests.create(Request(
+        user_open_id="ou_li", user_name="张三", type=LIMIT_CHANGE,
+        kiro_user_id="u1", payload={"username": "zhangsan", "requested_limit": 99999}))
+    svc.claim_approve(req.request_id, "ou_admin")
+    with patch("app.approval.provisioner.set_user_limit",
+               return_value=MagicMock(success=False, error="超过了积分池当前的 credits 总量")):
+        done = svc.execute_approved(req.request_id)
+    assert done.status == FAILED
+    assert "credits 总量" in done.result["error"]

@@ -5,12 +5,13 @@
       "Sid": "KiroProvisioningServices",
       "Effect": "Allow",
       "Action": [
+        "codewhisperer:*",
         "identitystore:*",
-        "sso:*",
-        "sso-directory:*",
         "q:*",
-        "user-subscriptions:*",
-        "codewhisperer:*"
+        "sso-directory:*",
+        "sso:*",
+        "sts:GetCallerIdentity",
+        "user-subscriptions:*"
       ],
       "Resource": "*"
     },
@@ -35,13 +36,11 @@
       ]
     },
     {
-      "Sid": "KiroOverageQuotaManage",
+      "Sid": "KiroQuotaRead",
       "Effect": "Allow",
       "Action": [
         "servicequotas:GetServiceQuota",
-        "servicequotas:GetAWSDefaultServiceQuota",
-        "servicequotas:RequestServiceQuotaIncrease",
-        "servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota"
+        "servicequotas:GetAWSDefaultServiceQuota"
       ],
       "Resource": "*"
     },

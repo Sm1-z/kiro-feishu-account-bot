@@ -67,18 +67,19 @@ def test_suggest_new_username_skips_taken():
 
 def test_record_new_account_first_is_primary(store):
     r = R.Resolver(store)
-    m1 = r.record_new_account("u1", "ou_li", "张三", "zhangsan", "l@x.com", "pro+", "team-a")
+    m1 = r.record_new_account("u1", "ou_li", "张三", "zhangsan", "l@x.com", "team-a", usage_limit=1000)
     assert m1.account_role == PRIMARY  # 首个=主
+    assert r.store.get("u1").usage_limit == 1000
 
-    m2 = r.record_new_account("u2", "ou_li", "张三", "zhangsan-new1", "l2@x.com", "power", "team-a")
+    m2 = r.record_new_account("u2", "ou_li", "张三", "zhangsan-new1", "l2@x.com", "team-a")
     assert m2.account_role == SECONDARY  # 第二个=副
 
 
 def test_accounts_of_is_db_only(store):
     """运行态主路径只读 DB，返回该人全部账号。"""
     r = R.Resolver(store)
-    r.record_new_account("u1", "ou_li", "张三", "zhangsan", "l@x.com", "pro", "t")
-    r.record_new_account("u2", "ou_li", "张三", "zhangsan-new1", "l2@x.com", "pro", "t")
+    r.record_new_account("u1", "ou_li", "张三", "zhangsan", "l@x.com", "t")
+    r.record_new_account("u2", "ou_li", "张三", "zhangsan-new1", "l2@x.com", "t")
     accounts = r.accounts_of("ou_li")
     assert len(accounts) == 2
     assert {a.kiro_user_id for a in accounts} == {"u1", "u2"}

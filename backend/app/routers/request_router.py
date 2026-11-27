@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""申请路由（普通用户）：开通 / 升级 / 配额 + 我的申请。
+"""申请路由（普通用户）：开通（加入积分池）/ 调整用量上限 / 配额 + 我的申请。
 
 提交时做前置校验（设计 PRD §3.4）：配额、用户名占用、邮箱唯一。
 提交后推飞书审批卡片给所有管理员，记录 message_id 供审批后更新卡片。
@@ -17,9 +17,9 @@ from app.auth import CurrentUser, current_user
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import (
-    APPLY, QUOTA_INCREASE, UPGRADE, Request, RequestStore,
+    APPLY, LIMIT_CHANGE, QUOTA_INCREASE, Request, RequestStore,
 )
-from app.schemas import ApplyIn, QuotaIn, UpgradeIn
+from app.schemas import ApplyIn, LimitChangeIn, QuotaIn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/requests", tags=["requests"])
@@ -46,10 +46,33 @@ def _username_exists_in_idc(username: str) -> bool:
         return False
 
 
+def _pool_hint(req_type: str) -> str:
+    """审批卡片上的积分池现状一句话（剩余 credits / 席位），拿不到就不显示。"""
+    try:
+        from app import pool
+        ctx = pool.get_context()
+        ov = pool.overview()
+        seats = pool.seat_status()
+        parts = [f"积分池剩余 {ov['total_left']:.0f} / {ov['total_quantity']:.0f} credits",
+                 f"已占座 {seats.get('seated') or 0} 人"]
+        if req_type == APPLY:
+            if ctx.prepaid:
+                avail = seats.get("available")
+                parts.append(f"预付：空余席位 {avail} 个" if avail
+                             else "预付：没有空余席位，通过后需先在控制台买席位")
+            else:
+                parts.append("后付：通过后自动占座，每人 $20/月（首月按天折算）")
+        return " · ".join(parts)
+    except Exception:  # noqa: BLE001
+        logger.warning("pool hint unavailable", exc_info=True)
+        return ""
+
+
 def _push_approval_cards(req: Request) -> list[str]:
     """给所有管理员推审批卡片，返回 message_id 列表。飞书失败不阻断申请落库。"""
     mids: list[str] = []
-    card = cards.build_approval_card(req.request_id, req.type, req.user_name, req.payload)
+    card = cards.build_approval_card(req.request_id, req.type, req.user_name, req.payload,
+                                     pool_hint=_pool_hint(req.type))
     for admin in settings.admin_id_set():
         try:
             mids.append(feishu.send_card(admin, card))
@@ -86,20 +109,29 @@ def apply(body: ApplyIn, user: CurrentUser = Depends(current_user)):
     return {"request_id": req.request_id, "status": req.status}
 
 
-@router.post("/upgrade")
-def upgrade(body: UpgradeIn, user: CurrentUser = Depends(current_user)):
+@router.post("/limit-change")
+def limit_change(body: LimitChangeIn, user: CurrentUser = Depends(current_user)):
+    """申请调整个人用量上限（credits / 月），审批通过后即时生效。"""
     store = MappingStore()
     reqs = RequestStore()
     acct = store.get(body.kiro_user_id)
     if not acct or acct.feishu_open_id != user.open_id:
         raise HTTPException(404, "账号不存在或不属于你")
     if acct.status != "active":
-        raise HTTPException(400, "仅 active 账号可升级")
+        raise HTTPException(400, "账号已停用，不能调整上限")
+    current = None
+    try:
+        from app import pool
+        eff = pool.effective_limit(body.kiro_user_id)
+        current = int(eff["limit"]) if eff else None
+    except Exception:  # noqa: BLE001 - 当前值只用于卡片展示
+        logger.warning("limit_change: effective limit unavailable")
 
     req = reqs.create(Request(
-        user_open_id=user.open_id, user_name=user.name, type=UPGRADE,
+        user_open_id=user.open_id, user_name=user.name, type=LIMIT_CHANGE,
         kiro_user_id=body.kiro_user_id,
-        payload={"username": acct.kiro_username, "target_tier": body.target_tier},
+        payload={"username": acct.kiro_username, "requested_limit": body.requested_limit,
+                 "current_limit": current, "reason": body.reason},
     ))
     mids = _push_approval_cards(req)
     if mids:

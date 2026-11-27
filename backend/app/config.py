@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     kiro_sign_in_url: str = Field(default="")
     kiro_group_name: str = Field(default="Q")
 
+    # ---- Kiro 积分池（credit pool）----
+    # 均可留空：运行时自动解析（account_id 用 STS，pool_arn 用 ListProfiles 的 creditPools）
+    kiro_account_id: str = Field(default="")
+    kiro_pool_arn: str = Field(default="")
+    # Kiro 控制台 Credit sharing 页面地址（买席位 / 买 credits 只能在控制台完成，前端放跳转链接；空则只显示文字提示）
+    kiro_console_url: str = Field(default="")
+
     # ---- DynamoDB 映射表 ----
     mapping_table_name: str = Field(default="kiro-account-mapping")
     mapping_gsi_name: str = Field(default="feishu_open_id-index")

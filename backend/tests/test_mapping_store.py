@@ -59,7 +59,7 @@ def test_put_and_get_by_userid(store):
         feishu_open_id="ou_zhangsan",
         feishu_name="张三",
         kiro_username="zhangsan",
-        tier="pro+",
+        usage_limit=1000,
         account_role=PRIMARY,
     )
     store.put(m)

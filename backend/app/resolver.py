@@ -101,8 +101,8 @@ class Resolver:
 
     def record_new_account(
         self, kiro_user_id: str, feishu_open_id: str, feishu_name: str,
-        kiro_username: str, kiro_email: str, tier: str, team: str,
-        approved_by: str = "",
+        kiro_username: str, kiro_email: str, team: str,
+        usage_limit: int | None = None, approved_by: str = "",
     ) -> AccountMapping:
         """新建账号开通成功后写映射。自动判定主/副：首个账号为主，其余为副。"""
         role = SECONDARY if self.store.has_primary(feishu_open_id) else PRIMARY
@@ -113,7 +113,7 @@ class Resolver:
             team=team,
             kiro_username=kiro_username,
             kiro_email=kiro_email,
-            tier=tier,
+            usage_limit=usage_limit,
             status="active",
             account_role=role,
             approved_by=approved_by,

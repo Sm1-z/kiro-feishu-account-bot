@@ -1,351 +1,165 @@
-"""Provisioner 逻辑测试。
+"""Provisioner 测试（积分池版）。
 
-mock 掉内部签名 API 与 IDC client，验证：tier 映射、订阅 tier 解析、
-幂等（ConflictException→False）、429 退避重试、开通分步错误定位。
+mock 掉 IDC client 与 app.pool，验证：开通 5+1 步顺序与分步错误定位、
+预付池无空余席位时成功但带 warning、停用 / 恢复 / 回收各自的副作用。
 """
 import os
 import sys
-import urllib.error
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.provisioner as P  # noqa: E402
 
 
-def _http_error(code, body):
-    e = urllib.error.HTTPError("http://x", code, "err", {}, None)
-    e.read = lambda: body.encode()
-    return e
-
-
-def test_tier_maps_complete():
-    assert set(P.TIER_MAP) == {"pro", "pro+", "pro max", "power"}
-    # 反向映射覆盖 standalone 与 enterprise 两套 plan code
-    assert P.TIER_REVERSE["Q_DEVELOPER_STANDALONE_POWER"] == "power"
-    assert P.TIER_REVERSE["KIRO_ENTERPRISE_PRO_PLUS"] == "pro+"
-    # 新增 Kiro Pro Max ($100)：两套 plan code 均能反查
-    assert P.TIER_REVERSE["Q_DEVELOPER_STANDALONE_PRO_MAX"] == "pro max"
-    assert P.TIER_REVERSE["KIRO_ENTERPRISE_PRO_MAX"] == "pro max"
-    assert P.TIER_DISPLAY["pro max"] == "Kiro Pro Max"
-
-
-def test_tier_of_subscription_both_shapes():
-    assert P._tier_of_subscription({"activatedType": {"amazonQ": "Q_DEVELOPER_STANDALONE_PRO"}}) == "pro"
-    assert P._tier_of_subscription({"type": {"amazonQ": "Q_DEVELOPER_STANDALONE_POWER"}}) == "power"
-    assert P._tier_of_subscription({}) == ""
-
-
-def test_create_assignment_idempotent_conflict():
-    """已订阅 → ConflictException → 返回 False，不报错。"""
-    with patch.object(P, "_signed_post", side_effect=_http_error(409, "ConflictException: exists")):
-        assert P._create_assignment("u1", "Q_DEVELOPER_STANDALONE_PRO", MagicMock(), "us-east-1") is False
-
-
-def test_create_assignment_retries_on_429():
-    """429 退避重试，最终成功。"""
-    calls = {"n": 0}
-
-    def flaky(*a, **k):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise _http_error(429, "TooManyRequests")
-        return b"{}"
-
-    with patch.object(P, "_signed_post", side_effect=flaky), \
-         patch("app.provisioner.time.sleep"):  # 跳过真实 sleep
-        assert P._create_assignment("u1", "Q_DEVELOPER_STANDALONE_PRO", MagicMock(), "us-east-1", max_retries=3) is True
-    assert calls["n"] == 3
-
-
-def test_create_assignment_gives_up_after_max_retries():
-    with patch.object(P, "_signed_post", side_effect=_http_error(429, "TooManyRequests")), \
-         patch("app.provisioner.time.sleep"):
-        with pytest.raises(RuntimeError):
-            P._create_assignment("u1", "Q_DEVELOPER_STANDALONE_PRO", MagicMock(), "us-east-1", max_retries=2)
-
-
-def test_delete_assignment_idempotent_not_found():
-    """已无订阅 → ResourceNotFound → 视为成功，不抛。"""
-    with patch.object(P, "_signed_post", side_effect=_http_error(404, "ResourceNotFoundException")):
-        P._delete_assignment("u1", MagicMock(), "us-east-1")  # 不应抛
-
-
-def test_provision_invalid_tier():
-    r = P.provision("u", "e@x.com", "G", "F", "deluxe", "Q")
-    assert r.success is False
-    assert r.error_step == "validate"
-
-
-def test_provision_happy_path_returns_userid():
-    """开通成功返回 UserId（稳定锚点），步骤齐全。"""
-    idc = MagicMock()
-    idc.create_user.return_value = {"UserId": "test-uid-aaaa"}
-    idc.get_group_id.return_value = {"GroupId": "g-1"}
-    idc.create_group_membership.return_value = {}
+@pytest.fixture
+def idc():
+    client = MagicMock()
+    client.create_user.return_value = {"UserId": "uid-1"}
+    client.get_group_id.return_value = {"GroupId": "g-1"}
     session = MagicMock()
-    session.client.return_value = idc
-
+    session.client.return_value = client
     with patch("app.provisioner.get_session", return_value=session), \
          patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
          patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "_send_password_reset"), \
-         patch.object(P, "_create_assignment", return_value=True):
-        r = P.provision("zhangsan", "l@x.com", "De", "Li", "pro+", "Q")
+         patch("app.provisioner.kiro_api.send_password_email") as pwd:
+        client.pwd = pwd
+        yield client
 
+
+def test_provision_happy_path_postpaid(idc):
+    with patch("app.provisioner.pool.add_member", return_value=True) as add, \
+         patch("app.provisioner.pool.assign_seat", return_value=(True, "AUTO")), \
+         patch("app.provisioner.pool.set_limit") as setl:
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a")
+    assert r.success is True and r.user_id == "uid-1" and r.warning == ""
+    assert r.steps_succeeded == ["user_created", "group_added", "password_email_sent",
+                                 "pool_joined", "seat_auto"]
+    add.assert_called_once_with("uid-1")
+    idc.pwd.assert_called_once()
+    setl.assert_not_called()  # 没申请上限就不设
+
+
+def test_provision_with_limit_sets_user_limit(idc):
+    with patch("app.provisioner.pool.add_member", return_value=True), \
+         patch("app.provisioner.pool.assign_seat", return_value=(True, "")), \
+         patch("app.provisioner.pool.set_limit") as setl:
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a", usage_limit=800)
     assert r.success is True
-    assert r.user_id == "test-uid-aaaa"
-    assert "user_created" in r.steps_succeeded
-    assert "subscription_created" in r.steps_succeeded
+    assert r.steps_succeeded[-2:] == ["seat_assigned", "limit_set"]
+    setl.assert_called_once_with("USER", "uid-1", 800)
 
 
-def test_provision_pro_max_uses_correct_subscription_type():
-    """开通 Kiro Pro Max 时，传给 CreateAssignment 的 subscriptionType 必须是 Pro Max 的映射值。"""
-    idc = MagicMock()
-    idc.create_user.return_value = {"UserId": "test-uid-bbbb"}
-    idc.get_group_id.return_value = {"GroupId": "g-1"}
-    idc.create_group_membership.return_value = {}
-    session = MagicMock()
-    session.client.return_value = idc
-
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "_send_password_reset"), \
-         patch.object(P, "_create_assignment", return_value=True) as mock_assign:
-        r = P.provision("zhangsan", "l@x.com", "De", "Li", "pro max", "Q")
-
+def test_provision_prepaid_no_seat_succeeds_with_warning(idc):
+    with patch("app.provisioner.pool.add_member", return_value=True), \
+         patch("app.provisioner.pool.assign_seat", return_value=(False, "CAPACITY_EXHAUSTED")):
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a")
     assert r.success is True
-    # _create_assignment(user_id, sub_type, credentials, region) —— sub_type 为第 2 个位置参数
-    assert mock_assign.call_args.args[1] == P.TIER_MAP["pro max"]
+    assert "awaiting_seat" in r.steps_succeeded
+    assert "没有空余席位" in r.warning
 
 
-def test_provision_duplicate_username_blocks():
-    """同名用户名 → create_user 抛 Conflict → error_step=create_user。"""
-    from botocore.exceptions import ClientError
-    idc = MagicMock()
+def test_provision_join_pool_failure_is_located(idc):
+    from app.pool import PoolError
+    with patch("app.provisioner.pool.add_member",
+               side_effect=PoolError("预付积分池还没有购买席位")):
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a")
+    assert r.success is False and r.error_step == "join_pool"
+    assert r.user_id == "uid-1"  # 前几步已完成，重试时幂等
+    assert "预付积分池还没有购买席位" in r.error
+
+
+def test_provision_duplicate_username_blocks(idc):
     idc.create_user.side_effect = ClientError(
         {"Error": {"Code": "ConflictException", "Message": "exists"}}, "CreateUser")
-    session = MagicMock()
-    session.client.return_value = idc
-
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()):
-        r = P.provision("zhangsan", "l@x.com", "De", "Li", "pro", "Q")
-
-    assert r.success is False
-    assert r.error_step == "create_user"
+    with patch("app.provisioner.pool.add_member") as add:
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a")
+    assert r.success is False and r.error_step == "create_user"
+    assert "已存在" in r.error
+    add.assert_not_called()
 
 
-def test_bulk_cancel_also_deletes_mapping():
-    """回收账号时：退订 + 删 IDC 用户 + 删映射三者同步，避免孤儿映射。"""
-    idc = MagicMock()
-    session = MagicMock()
-    session.client.return_value = idc
+def test_provision_group_already_member_is_idempotent(idc):
+    idc.create_group_membership.side_effect = ClientError(
+        {"Error": {"Code": "ConflictException", "Message": "dup"}}, "CreateGroupMembership")
+    with patch("app.provisioner.pool.add_member", return_value=False), \
+         patch("app.provisioner.pool.assign_seat", return_value=(True, "AUTO")):
+        r = P.provision("zhangsan", "l@x.com", "De", "Li", "team-a")
+    assert r.success is True
+    assert "group_already_member" in r.steps_succeeded
+    assert "pool_already_member" in r.steps_succeeded
+
+
+def test_set_user_limit_wraps_errors():
+    with patch("app.provisioner.pool.set_limit") as setl:
+        assert P.set_user_limit("u1", 1000).success is True
+    setl.assert_called_once_with("USER", "u1", 1000)
+    with patch("app.provisioner.pool.set_limit", side_effect=RuntimeError("超过总量")):
+        r = P.set_user_limit("u1", 99999)
+    assert r.success is False and "超过总量" in r.error
+
+
+def test_deactivate_removes_from_pool_and_marks_cancelled():
     mapping = MagicMock()
-
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "_delete_assignment"):
-        res = P.bulk_cancel(["uid-1", "uid-2"])
-
+    with patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch("app.provisioner.pool.remove_member") as rm:
+        res = P.deactivate(["u1", "u2"])
     assert all(r["success"] for r in res)
-    idc.delete_user.assert_any_call(IdentityStoreId="d-1", UserId="uid-1")
-    # 关键：映射也被删（修复孤儿记录 bug）
-    mapping.delete.assert_any_call("uid-1")
-    mapping.delete.assert_any_call("uid-2")
-    assert mapping.delete.call_count == 2
-
-
-# ---- upgrade：按订阅实况分流（CANCELLED 重订 vs ACTIVE 变更）----
-
-def _upgrade_env(live_status):
-    """构造 upgrade 依赖：IDC 返回固定 user_id，实况返回指定状态。"""
-    idc = MagicMock()
-    idc.get_user_id.return_value = {"UserId": "uid-1"}
-    session = MagicMock()
-    session.client.return_value = idc
-    live = {"uid-1": {"status": live_status, "tier": "pro max"}} if live_status else {}
-    return session, live
-
-
-def test_upgrade_cancelled_goes_recreate():
-    """已取消订阅 → 走 CreateAssignment 重订，不走 UpdateAssignment。
-
-    对 CANCELLED 订阅调 UpdateAssignment 服务端返回成功但不生效（实测），
-    原实现会把申请标成 executed 而实际没变。
-    """
-    session, live = _upgrade_env("CANCELLED")
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment", return_value=True) as ca, \
-         patch.object(P, "_update_assignment") as ua:
-        r = P.upgrade("zhangsan", "pro")
-    assert r.success is True
-    ca.assert_called_once()
-    ua.assert_not_called()
-
-
-def test_upgrade_cancelled_conflict_reports_billing_hold():
-    """重订被 Conflict 拒 → 失败并给出可读提示（不假 executed）。"""
-    session, live = _upgrade_env("CANCELLED")
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment", return_value=False):
-        r = P.upgrade("zhangsan", "pro")
-    assert r.success is False
-    assert "账期" in r.error
-
-
-def test_upgrade_active_goes_update():
-    """正常 ACTIVE 订阅 → 仍走 UpdateAssignment 变更路径。"""
-    session, live = _upgrade_env("ACTIVE")
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment") as ca, \
-         patch.object(P, "_update_assignment") as ua:
-        r = P.upgrade("zhangsan", "pro")
-    assert r.success is True
-    ua.assert_called_once()
-    ca.assert_not_called()
-
-
-def test_upgrade_no_subscription_goes_recreate():
-    """映射有账号但无任何订阅（控制台已退）→ 走 CreateAssignment。"""
-    session, live = _upgrade_env(None)
-    with patch("app.provisioner.get_session", return_value=session), \
-         patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment", return_value=True) as ca:
-        r = P.upgrade("zhangsan", "pro")
-    assert r.success is True
-    ca.assert_called_once()
-
-
-# ---- 停用方式 deletionMode（控制台「Deactivate Kiro plan」End of the month / Immediately）----
-
-def test_delete_assignment_default_mode_is_end_of_period():
-    """默认 END_OF_PERIOD，且 deletionMode 必须显式传（服务端对未知字段静默忽略，枚举要准）。"""
-    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
-        P._delete_assignment("u1", MagicMock(), "us-east-1")
-    payload = sp.call_args[0][4]
-    assert payload == {"principalId": "u1", "principalType": "USER", "deletionMode": "END_OF_PERIOD"}
-
-
-def test_delete_assignment_immediate_mode():
-    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
-        P._delete_assignment("u1", MagicMock(), "us-east-1", mode="immediate")
-    assert sp.call_args[0][4]["deletionMode"] == "IMMEDIATE"
-
-
-def test_delete_assignment_mode_case_insensitive():
-    with patch.object(P, "_signed_post", return_value=b"{}") as sp:
-        P._delete_assignment("u1", MagicMock(), "us-east-1", mode=" Immediate ")
-    assert sp.call_args[0][4]["deletionMode"] == "IMMEDIATE"
-
-
-def test_delete_assignment_invalid_mode_rejected_before_call():
-    with patch.object(P, "_signed_post") as sp:
-        with pytest.raises(ValueError):
-            P._delete_assignment("u1", MagicMock(), "us-east-1", mode="whenever")
-    sp.assert_not_called()
-
-
-def test_deactivate_keeps_user_and_mapping_but_marks_cancelled():
-    """停用 ≠ 回收：只退订，不删 IDC 用户、不删映射，映射 status 快照改 cancelled。"""
-    mapping = MagicMock()
-    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "_delete_assignment") as da, \
-         patch.object(P, "_invalidate_live_cache") as inv:
-        res = P.deactivate(["uid-1", "uid-2"], mode="immediate")
-
-    assert [r["success"] for r in res] == [True, True]
-    assert da.call_count == 2
-    assert all(c.args[3] == "immediate" for c in da.call_args_list)
-    mapping.update_fields.assert_any_call("uid-1", status="cancelled")
-    mapping.update_fields.assert_any_call("uid-2", status="cancelled")
-    mapping.delete.assert_not_called()
-    inv.assert_called_once()
+    assert rm.call_args_list == [call("u1"), call("u2")]
+    mapping.update_fields.assert_any_call("u1", status="cancelled")
+    mapping.delete.assert_not_called()  # 停用保留映射
 
 
 def test_deactivate_partial_failure_isolated():
     mapping = MagicMock()
-
-    def flaky(uid, creds, region, mode):
-        if uid == "uid-2":
-            raise RuntimeError("DeleteAssignment failed: HTTP 403")
-
-    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "_delete_assignment", side_effect=flaky):
-        res = P.deactivate(["uid-1", "uid-2"])
-
+    with patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch("app.provisioner.pool.remove_member",
+               side_effect=[None, RuntimeError("denied")]):
+        res = P.deactivate(["u1", "u2"])
     assert res[0]["success"] is True
-    assert res[1]["success"] is False and "403" in res[1]["error"]
-    mapping.update_fields.assert_called_once_with("uid-1", status="cancelled")
+    assert res[1]["success"] is False and "denied" in res[1]["error"]
 
 
-def test_bulk_cancel_passes_mode_through():
-    idc = MagicMock()
+def test_reactivate_rejoins_and_reports_seat_warning():
+    mapping = MagicMock()
+    with patch("app.mapping_store.MappingStore", return_value=mapping), \
+         patch("app.provisioner.pool.add_member") as add, \
+         patch("app.provisioner.pool.assign_seat",
+               side_effect=[(True, "AUTO"), (False, "CAPACITY_EXHAUSTED")]):
+        res = P.reactivate(["u1", "u2"])
+    assert add.call_count == 2
+    assert res[0]["success"] and res[0]["warning"] == ""
+    assert res[1]["success"] and "没有空余席位" in res[1]["warning"]
+    mapping.update_fields.assert_any_call("u1", status="active")
+
+
+def test_bulk_cancel_removes_pool_limit_user_and_mapping():
+    """回收：移出池 + 清个人上限 + 删 IDC 用户 + 删映射，避免孤儿记录。"""
+    client = MagicMock()
     session = MagicMock()
-    session.client.return_value = idc
+    session.client.return_value = client
+    mapping = MagicMock()
     with patch("app.provisioner.get_session", return_value=session), \
          patch("app.provisioner.get_identity_store_id", return_value="d-1"), \
-         patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=MagicMock()), \
-         patch.object(P, "_delete_assignment") as da:
-        P.bulk_cancel(["uid-1"], mode="immediate")
-    assert da.call_args.args[3] == "immediate"
-
-
-# ---- 恢复订阅（撤销月底停用）----
-
-def test_reactivate_uses_live_tier_and_marks_active():
-    mapping = MagicMock()
-    live = {"uid-1": {"status": "CANCELLED", "tier": "pro max"}}
-    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
          patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment", return_value=True) as ca:
-        res = P.reactivate(["uid-1"])
-    assert res[0]["success"] and res[0]["tier"] == "pro max"
-    assert ca.call_args.args[1] == "Q_DEVELOPER_STANDALONE_PRO_MAX"
-    mapping.update_fields.assert_called_once_with("uid-1", status="active", tier="pro max")
+         patch("app.provisioner.pool.list_limits",
+               return_value=[{"scope": "USER", "scope_id": "u1", "limit": 100.0}]), \
+         patch("app.provisioner.pool.set_limit") as setl, \
+         patch("app.provisioner.pool.remove_member") as rm:
+        res = P.bulk_cancel(["u1", "u2"])
+    assert all(r["success"] for r in res)
+    assert rm.call_count == 2
+    setl.assert_called_once_with("USER", "u1", None)  # 只清有个人上限的
+    client.delete_user.assert_any_call(IdentityStoreId="d-1", UserId="u2")
+    assert mapping.delete.call_count == 2
 
 
-def test_reactivate_falls_back_to_mapping_tier_when_no_live():
-    mapping = MagicMock()
-    mapping.get.return_value = MagicMock(tier="power")
-    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "live_subscription_map", side_effect=RuntimeError("down")), \
-         patch.object(P, "_create_assignment", return_value=True) as ca:
-        res = P.reactivate(["uid-1"])
-    assert res[0]["success"]
-    assert ca.call_args.args[1] == "Q_DEVELOPER_STANDALONE_POWER"
-
-
-def test_reactivate_conflict_and_unknown_tier_reported():
-    mapping = MagicMock()
-    mapping.get.return_value = None
-    live = {"uid-1": {"status": "CANCELLED", "tier": "pro"}}
-    with patch("app.provisioner.get_frozen_credentials", return_value=MagicMock()), \
-         patch("app.mapping_store.MappingStore", return_value=mapping), \
-         patch.object(P, "live_subscription_map", return_value=live), \
-         patch.object(P, "_create_assignment", return_value=False):
-        res = P.reactivate(["uid-1", "uid-2"])
-    assert res[0]["success"] is False and "Conflict" in res[0]["error"]
-    assert res[1]["success"] is False and "原套餐" in res[1]["error"]
+def test_retry_seats_reports_per_user():
+    with patch("app.provisioner.pool.assign_seat",
+               side_effect=[(True, ""), (False, "CAPACITY_EXHAUSTED")]):
+        res = P.retry_seats(["u1", "u2"])
+    assert res[0]["success"] is True
+    assert res[1]["success"] is False and "没有空余席位" in res[1]["error"]

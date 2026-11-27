@@ -18,8 +18,8 @@
     team                  分组
     kiro_username         展示（退化为非关键字段）
     kiro_email
-    tier                  pro / pro+ / power / ""
-    status                active / cancelled
+    usage_limit           个人用量上限快照（credits / 账期；空 = 走组上限或 profile 默认）
+    status                active / cancelled（cancelled = 已移出积分池，IDC 用户保留）
     account_role          primary / secondary   ★ 主副维度
     retention             permanent / monthly    ★ 由 role 推导
     approved_by           审批人 open_id（审计）
@@ -58,7 +58,7 @@ class AccountMapping:
     team: str = ""
     kiro_username: str = ""
     kiro_email: str = ""
-    tier: str = ""
+    usage_limit: int | None = None
     status: str = "active"
     account_role: str = SECONDARY
     retention: str = MONTHLY
@@ -78,7 +78,7 @@ class AccountMapping:
         known = {f for f in cls.__dataclass_fields__}
         data = {k: v for k, v in item.items() if k in known}
         # DynamoDB 数字回来是 Decimal
-        for tk in ("created_at", "updated_at"):
+        for tk in ("created_at", "updated_at", "usage_limit"):
             if tk in data and data[tk] is not None:
                 data[tk] = int(data[tk])
         return cls(**data)
@@ -102,7 +102,7 @@ class MappingStore:
         self._table.put_item(Item=mapping.to_item())
 
     def update_fields(self, kiro_user_id: str, **fields) -> None:
-        """局部更新（如改 tier / status / account_role）。"""
+        """局部更新（如改 usage_limit / status / account_role）。"""
         if not fields:
             return
         fields["updated_at"] = _now()

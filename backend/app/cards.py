@@ -9,36 +9,46 @@
 """
 from __future__ import annotations
 
-TYPE_LABEL = {"apply": "开通账号", "upgrade": "升级套餐", "quota_increase": "增加配额"}
-TIER_LABEL = {"pro": "Kiro Pro", "pro+": "Kiro Pro+", "pro max": "Kiro Pro Max", "power": "Kiro Power"}
+TYPE_LABEL = {"apply": "开通账号", "limit_change": "调整用量上限", "quota_increase": "增加配额"}
 
 
-def _fields(req_type: str, applicant: str, payload: dict) -> list[dict]:
+def _limit_text(v) -> str:
+    return f"{v} credits / 月" if v not in (None, "") else "默认（组上限或 profile 默认上限）"
+
+
+def _fields(req_type: str, applicant: str, payload: dict, pool_hint: str = "") -> list[dict]:
     rows = [f"**申请人**：{applicant}", f"**类型**：{TYPE_LABEL.get(req_type, req_type)}"]
     if req_type == "apply":
         rows += [
             f"**用户名**：{payload.get('username', '')}",
             f"**邮箱**：{payload.get('email', '')}",
             f"**分组**：{payload.get('group', '')}",
-            f"**套餐**：{TIER_LABEL.get(payload.get('tier', ''), payload.get('tier', ''))}",
+            f"**用量上限**：{_limit_text(payload.get('usage_limit'))}",
         ]
-    elif req_type == "upgrade":
+    elif req_type == "limit_change":
         rows += [
             f"**用户名**：{payload.get('username', '')}",
-            f"**目标套餐**：{TIER_LABEL.get(payload.get('target_tier', ''), payload.get('target_tier', ''))}",
+            f"**当前上限**：{_limit_text(payload.get('current_limit'))}",
+            f"**申请上限**：{_limit_text(payload.get('requested_limit'))}",
         ]
     elif req_type == "quota_increase":
         rows.append(f"**申请配额**：{payload.get('requested_quota', '')}")
-    return [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(rows)}}]
+    if payload.get("reason"):
+        rows.append(f"**理由**：{payload['reason']}")
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(rows)}}]
+    if pool_hint:
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": pool_hint}]})
+    return elements
 
 
-def build_approval_card(request_id: str, req_type: str, applicant: str, payload: dict) -> dict:
-    """待审批卡片（含按钮）。"""
+def build_approval_card(request_id: str, req_type: str, applicant: str, payload: dict,
+                        pool_hint: str = "") -> dict:
+    """待审批卡片（含按钮）。pool_hint：积分池现状一句话（剩余 credits / 席位），帮助审批人判断。"""
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange",
                    "title": {"tag": "plain_text", "content": f"🔔 Kiro 申请待审批 · {TYPE_LABEL.get(req_type, req_type)}"}},
-        "elements": _fields(req_type, applicant, payload) + [
+        "elements": _fields(req_type, applicant, payload, pool_hint) + [
             {"tag": "action", "actions": [
                 {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 通过"},
                  "type": "primary", "value": {"action": "approve", "request_id": request_id}},
@@ -78,8 +88,8 @@ def build_final_card(req_type: str, applicant: str, payload: dict, reviewer: str
 
 
 def build_user_result_card(req_type: str, payload: dict, success: bool,
-                           sign_in_url: str = "", reason: str = "") -> dict:
-    """通知申请人结果。"""
+                           sign_in_url: str = "", reason: str = "", warning: str = "") -> dict:
+    """通知申请人结果。warning：成功但有待办（如预付池暂无空余席位）。"""
     if success:
         rows = [f"你的「{TYPE_LABEL.get(req_type, req_type)}」申请已通过 ✅"]
         if req_type == "apply":
@@ -87,6 +97,10 @@ def build_user_result_card(req_type: str, payload: dict, success: bool,
             if sign_in_url:
                 rows.append(f"**登录地址**：{sign_in_url}")
             rows.append("请查收邮箱中的密码设置邮件。")
+        elif req_type == "limit_change":
+            rows.append(f"**新上限**：{_limit_text(payload.get('requested_limit'))}（已即时生效）")
+        if warning:
+            rows.append(f"⚠️ {warning}")
         template, title = "green", "✅ 申请已通过"
     else:
         rows = [f"你的「{TYPE_LABEL.get(req_type, req_type)}」申请未通过 ❌"]

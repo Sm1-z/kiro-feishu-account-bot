@@ -1,61 +1,29 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Kiro 账号开通/变更/取消/查询 核心工作流。
+"""Kiro 账号开通 / 上限调整 / 停用 / 恢复 / 回收（积分池版）核心工作流。
 
-设计要点（安全基线）：
-- 凭证全部走 app.aws（IAM Role），无任何 AK/SK
-- 开通成功返回 UserId（稳定锚点），供上层写入 DynamoDB 映射
-- 分步错误定位 + 批量并发；全步骤幂等；订阅 429 指数退避重试
+开通（全步骤幂等，分步错误定位）：
+  1) IAM Identity Center 建用户  2) 加组  3) 发密码设置邮件
+  4) 加入积分池  5) 席位（预付池分配；后付池加入即自动占座）  6) 可选：设置个人用量上限
+预付池没有空余席位时，开通仍算成功（用户已在池里，状态为「等待席位」），结果带 warning，
+管理员在 Kiro 控制台买席位后用「重新分配席位」补上。
 
-涉及两个**非公开内部 API**（手动 SigV4 直连，AWS 变更可能失效，见设计 04 D3）：
-- SWBUPService.UpdatePassword       发送密码设置邮件
-- AmazonQDeveloperService.*Assignment  订阅管理
+设计要点（安全基线）：凭证全部走 app.aws（IAM Role），无 AK/SK；
+开通成功返回 IDC UserId（稳定锚点），供上层写 DynamoDB 映射。
 """
 from __future__ import annotations
 
-import json
 import logging
-import threading
-import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-import botocore.auth
-import botocore.awsrequest
 from botocore.exceptions import ClientError
 
+from app import kiro_api, pool
 from app.aws import get_frozen_credentials, get_identity_store_id, get_session
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-TIER_MAP = {
-    "pro": "Q_DEVELOPER_STANDALONE_PRO",
-    "pro+": "Q_DEVELOPER_STANDALONE_PRO_PLUS",
-    # Kiro Pro Max ($100)。subscriptionType 已对照 CreateAssignment 服务端枚举验证为合法值
-    # （枚举全集：FREE/STUDENT/PRO/PRO_PLUS/PRO_MAX/POWER/STANDALONE）。
-    "pro max": "Q_DEVELOPER_STANDALONE_PRO_MAX",
-    "power": "Q_DEVELOPER_STANDALONE_POWER",
-}
-TIER_DISPLAY = {
-    "pro": "Kiro Pro",
-    "pro+": "Kiro Pro+",
-    "pro max": "Kiro Pro Max",
-    "power": "Kiro Power",
-}
-TIER_REVERSE = {
-    "Q_DEVELOPER_STANDALONE_PRO": "pro",
-    "Q_DEVELOPER_STANDALONE_PRO_PLUS": "pro+",
-    "Q_DEVELOPER_STANDALONE_PRO_MAX": "pro max",
-    "Q_DEVELOPER_STANDALONE_POWER": "power",
-    "KIRO_ENTERPRISE_PRO": "pro",
-    "KIRO_ENTERPRISE_PRO_PLUS": "pro+",
-    "KIRO_ENTERPRISE_PRO_MAX": "pro max",
-    "KIRO_ENTERPRISE_POWER": "power",
-}
 
 
 @dataclass
@@ -64,6 +32,7 @@ class ProvisionResult:
     user_id: str = ""
     error: str = ""
     error_step: str = ""
+    warning: str = ""
     steps_succeeded: list = field(default_factory=list)
 
 
@@ -71,151 +40,21 @@ class ProvisionResult:
 class SimpleResult:
     success: bool
     error: str = ""
-
-
-# ---------------------------------------------------------------------------
-# 内部签名 API helper（SigV4 手签直连）
-# ---------------------------------------------------------------------------
-
-def _signed_post(url: str, target: str, service: str, region: str,
-                 payload: dict, credentials) -> bytes:
-    """对内部 JSON-1.0 API 做 SigV4 签名并 POST，返回响应体。"""
-    body = json.dumps(payload)
-    headers = {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": target,
-    }
-    req = botocore.awsrequest.AWSRequest(method="POST", url=url, data=body, headers=headers)
-    botocore.auth.SigV4Auth(credentials, service, region).add_auth(req)
-    http_req = urllib.request.Request(
-        url, data=body.encode(), headers=dict(req.headers), method="POST"
-    )
-    return urllib.request.urlopen(http_req, timeout=30).read()
-
-
-def _send_password_reset(user_id: str, credentials, region: str) -> None:
-    try:
-        _signed_post(
-            f"https://identitystore.{region}.amazonaws.com/",
-            "SWBUPService.UpdatePassword", "userpool", region,
-            {"UserId": user_id, "PasswordMode": "EMAIL"}, credentials,
-        )
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"UpdatePassword failed: HTTP {exc.code}: {exc.read().decode()}") from exc
-
-
-def _create_assignment(user_id: str, sub_type: str, credentials, region: str,
-                       max_retries: int = 3) -> bool:
-    """订阅。ConflictException=已订阅(幂等)；429 指数退避。返回 True=新订阅。"""
-    url = f"https://codewhisperer.{region}.amazonaws.com/"
-    payload = {"principalId": user_id, "principalType": "USER", "subscriptionType": sub_type}
-    for attempt in range(max_retries + 1):
-        try:
-            _signed_post(url, "AmazonQDeveloperService.CreateAssignment", "q",
-                         region, payload, credentials)
-            return True
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode()
-            if "ConflictException" in body:
-                return False
-            if exc.code == 429 and attempt < max_retries:
-                time.sleep(min(5 * 2 ** attempt, 60))
-                continue
-            raise RuntimeError(f"CreateAssignment failed: HTTP {exc.code}: {body}") from exc
-    raise RuntimeError("CreateAssignment: max retries exceeded")
-
-
-def _update_assignment(user_id: str, sub_type: str, credentials, region: str) -> None:
-    try:
-        _signed_post(
-            f"https://codewhisperer.{region}.amazonaws.com/",
-            "AmazonQDeveloperService.UpdateAssignment", "q", region,
-            {"principalId": user_id, "principalType": "USER", "subscriptionType": sub_type},
-            credentials,
-        )
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode()
-        # Kiro 控制面对「订阅尚未激活(PENDING)的账号」做变更会返回
-        # AccessDeniedException「your account is not authorized」——这是业务时序限制，
-        # 非 IAM 权限问题（EC2 最小权限 Role 实测：同账号 Create 成功、对已订阅再操作即被拒）。
-        # 翻译成用户可理解的提示。
-        if "AccessDeniedException" in body or exc.code in (400, 403):
-            raise RuntimeError(
-                "升级失败：该账号订阅尚未激活（PENDING），暂不能变更套餐。"
-                "请待用户首次登录 Kiro 激活订阅后再升级。"
-            ) from exc
-        raise RuntimeError(f"UpdateAssignment failed: HTTP {exc.code}: {body}") from exc
-
-
-# 停用（DeleteAssignment）的生效时机，对应 Kiro 控制台「Deactivate Kiro plan」的两个选项。
-#   end_of_period → END_OF_PERIOD：访问与计费都到当前账期末（月底）结束；订阅在此期间显示 CANCELLED。
-#   immediate     → IMMEDIATE：立即切断访问；**计费仍收到账期末**（不省当月费用），适合离职/安全事件。
-# 服务端默认 END_OF_PERIOD；未知字段会被服务端静默忽略，所以枚举值必须准确。
-DELETION_MODES = {"end_of_period": "END_OF_PERIOD", "immediate": "IMMEDIATE"}
-DEFAULT_DELETION_MODE = "end_of_period"
-
-
-def _deletion_mode_value(mode: str | None) -> str:
-    key = (mode or DEFAULT_DELETION_MODE).strip().lower()
-    if key not in DELETION_MODES:
-        raise ValueError(f"无效停用方式: {mode}（可选 end_of_period / immediate）")
-    return DELETION_MODES[key]
-
-
-def _delete_assignment(user_id: str, credentials, region: str,
-                       mode: str = DEFAULT_DELETION_MODE) -> None:
-    """取消订阅。ResourceNotFound=已无订阅(幂等)。mode 见 DELETION_MODES。"""
-    payload = {"principalId": user_id, "principalType": "USER",
-               "deletionMode": _deletion_mode_value(mode)}
-    try:
-        _signed_post(
-            f"https://codewhisperer.{region}.amazonaws.com/",
-            "AmazonQDeveloperService.DeleteAssignment", "q", region,
-            payload, credentials,
-        )
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode()
-        if "ResourceNotFoundException" in body:
-            return
-        raise RuntimeError(f"DeleteAssignment failed: HTTP {exc.code}: {body}") from exc
-
-
-def _list_subscriptions(credentials, region: str) -> list[dict]:
-    try:
-        raw = _signed_post(
-            f"https://service.user-subscriptions.{region}.amazonaws.com/",
-            "AWSZornControlPlaneService.ListUserSubscriptions", "user-subscriptions",
-            region,
-            {"instanceArn": settings.sso_instance_arn, "maxResults": 1000,
-             "subscriptionRegion": region},
-            credentials,
-        )
-        return json.loads(raw.decode()).get("subscriptions", [])
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"ListUserSubscriptions failed: HTTP {exc.code}: {exc.read().decode()}") from exc
-
-
-def _tier_of_subscription(sub: dict) -> str:
-    plan = sub.get("activatedType", {}).get("amazonQ", "") or sub.get("type", {}).get("amazonQ", "")
-    return TIER_REVERSE.get(plan, "")
+    warning: str = ""
 
 
 # ---------------------------------------------------------------------------
 # IDC helper
 # ---------------------------------------------------------------------------
 
-def _get_user_id_by_name(idc, id_store: str, username: str) -> str:
-    resp = idc.get_user_id(
-        IdentityStoreId=id_store,
-        AlternateIdentifier={
-            "UniqueAttribute": {"AttributePath": "userName", "AttributeValue": username}
-        },
-    )
-    return resp["UserId"]
+def _idc():
+    session = get_session()
+    return session.client("identitystore", region_name=settings.aws_region), \
+        get_identity_store_id(session)
 
 
 def _create_user(idc, id_store, username, given_name, family_name, email) -> tuple[str, bool]:
-    """创建 IDC 用户。已存在(同名)抛错防认领他人账号。返回 (user_id, created)。"""
+    """创建 IDC 用户。同名已存在直接报错（防止认领他人账号）。返回 (user_id, created)。"""
     try:
         resp = idc.create_user(
             IdentityStoreId=id_store,
@@ -231,300 +70,202 @@ def _create_user(idc, id_store, username, given_name, family_name, email) -> tup
         raise
 
 
+def _add_to_group(idc, id_store, user_id: str, group_name: str) -> bool:
+    """加组。返回 True = 新加入，False = 已是组成员。"""
+    gid = idc.get_group_id(
+        IdentityStoreId=id_store,
+        AlternateIdentifier={"UniqueAttribute": {
+            "AttributePath": "displayName", "AttributeValue": group_name}},
+    )["GroupId"]
+    try:
+        idc.create_group_membership(IdentityStoreId=id_store, GroupId=gid,
+                                    MemberId={"UserId": user_id})
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConflictException":
+            return False
+        raise
+
+
+def _seat_warning(reason: str) -> str:
+    return pool.SEAT_REASON_TEXT.get(reason, f"席位分配未完成（{reason}），请在管理页重试")
+
+
 # ---------------------------------------------------------------------------
-# 公开接口
+# 开通
 # ---------------------------------------------------------------------------
 
 def provision(username: str, email: str, given_name: str, family_name: str,
-              tier: str, group_name: str) -> ProvisionResult:
-    """开通 Kiro 账号（4 步幂等）。成功后 result.user_id 即稳定锚点。"""
-    tier_key = tier.strip().lower()
-    sub_type = TIER_MAP.get(tier_key)
-    if not sub_type:
-        return ProvisionResult(success=False, error=f"无效套餐: {tier}", error_step="validate")
-
-    region = settings.aws_region
+              group_name: str, usage_limit: float | None = None) -> ProvisionResult:
+    """开通 Kiro 账号并加入积分池。成功后 result.user_id 即稳定锚点。"""
     result = ProvisionResult(success=False)
     try:
-        session = get_session()
-        id_store = get_identity_store_id(session)
-        idc = session.client("identitystore", region_name=region)
+        idc, id_store = _idc()
         creds = get_frozen_credentials()
-
-        # 1) 创建用户
-        try:
-            user_id, created = _create_user(idc, id_store, username, given_name, family_name, email)
-            result.user_id = user_id
-            result.steps_succeeded.append("user_created" if created else "user_exists")
-        except Exception as exc:
-            result.error, result.error_step = str(exc), "create_user"
-            return result
-
-        # 2) 加组
-        try:
-            gid = idc.get_group_id(
-                IdentityStoreId=id_store,
-                AlternateIdentifier={"UniqueAttribute": {
-                    "AttributePath": "displayName", "AttributeValue": group_name}},
-            )["GroupId"]
-            try:
-                idc.create_group_membership(
-                    IdentityStoreId=id_store, GroupId=gid, MemberId={"UserId": user_id})
-                result.steps_succeeded.append("group_added")
-            except ClientError as exc:
-                if exc.response["Error"]["Code"] == "ConflictException":
-                    result.steps_succeeded.append("group_already_member")
-                else:
-                    raise
-        except Exception as exc:
-            result.error, result.error_step = f"加入组 '{group_name}' 失败: {exc}", "add_to_group"
-            return result
-
-        # 3) 密码邮件
-        try:
-            _send_password_reset(user_id, creds, region)
-            result.steps_succeeded.append("password_email_sent")
-        except Exception as exc:
-            result.error, result.error_step = f"发送密码邮件失败: {exc}", "send_password"
-            return result
-
-        # 4) 订阅
-        try:
-            new_sub = _create_assignment(user_id, sub_type, creds, region)
-            result.steps_succeeded.append("subscription_created" if new_sub else "already_subscribed")
-        except Exception as exc:
-            result.error, result.error_step = f"订阅 Kiro 失败: {exc}", "kiro_subscribe"
-            return result
-
-        _invalidate_live_cache()
-        result.success = True
-        return result
-    except Exception as exc:
-        result.error, result.error_step = f"未预期错误: {exc}", "unknown"
-        logger.exception("provision failed")
+    except Exception as exc:  # noqa: BLE001
+        result.error, result.error_step = f"AWS 凭证 / IDC 不可用: {exc}", "init"
         return result
 
+    steps = [
+        ("create_user", lambda: _step_create_user(result, idc, id_store, username,
+                                                  given_name, family_name, email)),
+        ("add_to_group", lambda: result.steps_succeeded.append(
+            "group_added" if _add_to_group(idc, id_store, result.user_id, group_name)
+            else "group_already_member")),
+        ("send_password", lambda: (kiro_api.send_password_email(result.user_id, credentials=creds),
+                                   result.steps_succeeded.append("password_email_sent"))),
+        ("join_pool", lambda: result.steps_succeeded.append(
+            "pool_joined" if pool.add_member(result.user_id) else "pool_already_member")),
+        ("assign_seat", lambda: _step_seat(result)),
+    ]
+    if usage_limit is not None:
+        steps.append(("set_limit", lambda: (pool.set_limit("USER", result.user_id, usage_limit),
+                                            result.steps_succeeded.append("limit_set"))))
+    labels = {"create_user": "创建用户", "add_to_group": f"加入组 '{group_name}'",
+              "send_password": "发送密码邮件", "join_pool": "加入积分池",
+              "assign_seat": "分配席位", "set_limit": "设置用量上限"}
+    for name, fn in steps:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - 分步定位，原样带回错误
+            msg = str(exc)
+            result.error = msg if name == "create_user" else f"{labels[name]}失败: {msg}"
+            result.error_step = name
+            logger.warning("provision step %s failed: %s", name, msg)
+            return result
+    result.success = True
+    return result
 
-def upgrade(username: str, tier: str) -> SimpleResult:
-    tier_key = tier.strip().lower()
-    sub_type = TIER_MAP.get(tier_key)
-    if not sub_type:
-        return SimpleResult(success=False, error=f"无效套餐: {tier}")
-    region = settings.aws_region
+
+def _step_create_user(result, idc, id_store, username, given_name, family_name, email):
+    user_id, created = _create_user(idc, id_store, username, given_name, family_name, email)
+    result.user_id = user_id
+    result.steps_succeeded.append("user_created" if created else "user_exists")
+
+
+def _step_seat(result: ProvisionResult) -> None:
+    ok, reason = pool.assign_seat(result.user_id)
+    if ok:
+        result.steps_succeeded.append("seat_auto" if reason == "AUTO" else "seat_assigned")
+    else:
+        result.steps_succeeded.append("awaiting_seat")
+        result.warning = _seat_warning(reason)
+
+
+# ---------------------------------------------------------------------------
+# 上限 / 席位
+# ---------------------------------------------------------------------------
+
+def set_user_limit(user_id: str, limit: float | None) -> SimpleResult:
+    """设置 / 删除个人用量上限（None = 删除，回落到组上限或 profile 默认）。"""
     try:
-        session = get_session()
-        id_store = get_identity_store_id(session)
-        idc = session.client("identitystore", region_name=region)
-        user_id = _get_user_id_by_name(idc, id_store, username)
-        creds = get_frozen_credentials()
-
-        # 按订阅实况决定动作：已取消/无订阅 → 重新订阅（CreateAssignment）。
-        # 对 CANCELLED 订阅调 UpdateAssignment 服务端返回成功但不生效（实测），
-        # 会造成申请 executed 而实际没变的假象。实况不可得时按原变更路径走。
-        live_status = "UNKNOWN"
-        try:
-            sub = live_subscription_map(force=True).get(user_id)
-            live_status = sub["status"] if sub else None
-        except Exception:
-            pass
-
-        if live_status is None or live_status == "CANCELLED":
-            created = _create_assignment(user_id, sub_type, creds, region)
-            if not created:
-                # 2026-11 实测：月底停用 / 立即停用后的 CANCELLED 订阅同月可直接重订（回到 PENDING），
-                # Conflict 不再是常态；仍被拒时多为原订阅账期状态冲突，给可读提示而非假 executed。
-                return SimpleResult(success=False, error=(
-                    "重新订阅被服务端拒绝（Conflict）：原订阅账期状态冲突。"
-                    "请稍后重试，或联系管理员在 Kiro 控制台处理。"))
-            _invalidate_live_cache()
-            return SimpleResult(success=True)
-
-        _update_assignment(user_id, sub_type, creds, region)
-        _invalidate_live_cache()
+        pool.set_limit("USER", user_id, limit)
         return SimpleResult(success=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return SimpleResult(success=False, error=str(exc))
 
 
-def cancel(username: str, mode: str = DEFAULT_DELETION_MODE) -> SimpleResult:
-    region = settings.aws_region
-    try:
-        session = get_session()
-        id_store = get_identity_store_id(session)
-        idc = session.client("identitystore", region_name=region)
-        user_id = _get_user_id_by_name(idc, id_store, username)
-        _delete_assignment(user_id, get_frozen_credentials(), region, mode)
-        _invalidate_live_cache()
-        return SimpleResult(success=True)
-    except Exception as exc:
-        return SimpleResult(success=False, error=str(exc))
-
-
-_LIVE_CACHE_TTL = 60  # 秒；用户端 /me 每次进页都会打，不能每次全量拉订阅
-_live_cache: dict = {"ts": 0.0, "data": None}
-_live_lock = threading.Lock()
-
-
-def live_subscription_map(force: bool = False) -> dict:
-    """全量订阅实况 {user_id: {"status": ACTIVE/PENDING/..., "tier": pro/...}}。
-
-    供账号页展示实时状态——DynamoDB 映射里的 status/tier 是平台操作时的快照，
-    管理员在 AWS 控制台直接退订/改套餐不会回写映射表，以此接口为准。
-    短 TTL 缓存；force=True（管理端刷新按钮）强制重拉。失败抛异常由调用方降级。
-    """
-    now = time.time()
-    with _live_lock:
-        if not force and (now - _live_cache["ts"]) < _LIVE_CACHE_TTL \
-           and _live_cache["data"] is not None:
-            return _live_cache["data"]
-    creds = get_frozen_credentials()
-    out: dict = {}
-    for sub in _list_subscriptions(creds, settings.aws_region):
-        uid = sub.get("principal", {}).get("user", "")
-        if uid:
-            out[uid] = {"status": sub.get("status", ""), "tier": _tier_of_subscription(sub)}
-    with _live_lock:
-        _live_cache["ts"], _live_cache["data"] = time.time(), out
-    return out
-
-
-def _invalidate_live_cache() -> None:
-    """订阅变更（开通/升级/取消）后调用，让下次实况读取拿到新状态。"""
-    with _live_lock:
-        _live_cache["ts"] = 0.0
-
-
-def query_tier(username: str) -> str | None:
-    """查询用户当前 tier（pro/pro+/power）或 None。"""
-    region = settings.aws_region
-    try:
-        session = get_session()
-        id_store = get_identity_store_id(session)
-        idc = session.client("identitystore", region_name=region)
-        creds = get_frozen_credentials()
-        user_id = _get_user_id_by_name(idc, id_store, username)
-        for sub in _list_subscriptions(creds, region):
-            if sub.get("principal", {}).get("user") == user_id and \
-               sub.get("status") in ("ACTIVE", "PENDING"):
-                return _tier_of_subscription(sub)
-        return None
-    except Exception:
-        return None
-
-
-# ---- 批量（管理员运维 / 副账号回收）----
-
-def bulk_update_tier(user_ids: list[str], tier: str) -> list[dict]:
-    sub_type = TIER_MAP.get(tier.strip().lower())
-    if not sub_type:
-        return [{"user_id": u, "success": False, "error": f"无效套餐: {tier}"} for u in user_ids]
-    region = settings.aws_region
-    creds = get_frozen_credentials()
-
-    def _do(uid):
+def retry_seats(user_ids: list[str]) -> list[dict]:
+    """预付池：对「等待席位」的账号重新分配席位（管理员在控制台买完席位后用）。"""
+    results = []
+    for uid in user_ids:
         try:
-            _update_assignment(uid, sub_type, creds, region)
-            return {"user_id": uid, "success": True, "error": ""}
-        except Exception as exc:
-            return {"user_id": uid, "success": False, "error": str(exc)}
-
-    if not user_ids:
-        return []
-    with ThreadPoolExecutor(max_workers=min(10, len(user_ids))) as ex:
-        return list(ex.map(_do, user_ids))
+            ok, reason = pool.assign_seat(uid)
+            results.append({"user_id": uid, "success": ok,
+                            "error": "" if ok else _seat_warning(reason)})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"user_id": uid, "success": False, "error": str(exc)})
+    return results
 
 
-def deactivate(user_ids: list[str], mode: str = DEFAULT_DELETION_MODE) -> list[dict]:
-    """批量停用订阅（只退订，保留 IDC 用户与映射）= 控制台「Deactivate Kiro plan」。
+# ---------------------------------------------------------------------------
+# 停用 / 恢复 / 回收
+# ---------------------------------------------------------------------------
 
-    映射表 status 同步写 cancelled 作快照；展示仍以订阅实况为准
-    （END_OF_PERIOD 期间实况为 CANCELLED，IMMEDIATE 后订阅直接消失）。
-    ResourceNotFound 视为成功（幂等）。
+def deactivate(user_ids: list[str]) -> list[dict]:
+    """停用 = 移出积分池（即时生效），保留 IDC 用户与映射。
+
+    已产生的 credits 不退；本账期的席位费照收，下个账期起不再计费。
+    用户若还通过某个已加入池的组拿到访问，移出直接分配后仍可使用（见 live 实况）。
     """
     from app.mapping_store import CANCELLED, MappingStore
 
-    region = settings.aws_region
-    creds = get_frozen_credentials()
     mapping = MappingStore()
     results = []
     for uid in user_ids:
         try:
-            _delete_assignment(uid, creds, region, mode)
+            pool.remove_member(uid)
             try:
                 mapping.update_fields(uid, status=CANCELLED)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("deactivate: mapping snapshot update failed for %s", uid)
             results.append({"user_id": uid, "success": True, "error": ""})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             results.append({"user_id": uid, "success": False, "error": str(exc)})
-    _invalidate_live_cache()
     return results
 
 
 def reactivate(user_ids: list[str]) -> list[dict]:
-    """恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐 CreateAssignment。
-
-    套餐来源：订阅实况 tier（CANCELLED 记录仍带原套餐）→ 映射表 tier 快照 → 都没有则失败。
-    2026-11 实测：END_OF_PERIOD / IMMEDIATE 停用后同月重订均成功，订阅回到 PENDING。
-    ConflictException（_create_assignment 返回 False）按失败上报。
-    """
+    """恢复 = 重新加入积分池并分配席位。席位不足时成功但带 warning。"""
     from app.mapping_store import ACTIVE, MappingStore
 
-    region = settings.aws_region
-    creds = get_frozen_credentials()
     mapping = MappingStore()
-    try:
-        live = live_subscription_map(force=True)
-    except Exception:
-        live = {}
     results = []
     for uid in user_ids:
         try:
-            tier_key = (live.get(uid) or {}).get("tier") or ""
-            if not tier_key:
-                m = mapping.get(uid)
-                tier_key = (m.tier if m else "") or ""
-            sub_type = TIER_MAP.get(tier_key.strip().lower())
-            if not sub_type:
-                raise RuntimeError(f"无法确定原套餐（实况/映射均无 tier），请改走「升级」指定套餐")
-            created = _create_assignment(uid, sub_type, creds, region)
-            if not created:
-                raise RuntimeError("重新订阅被服务端拒绝（Conflict），请稍后重试或在 Kiro 控制台处理")
+            pool.add_member(uid)
+            ok, reason = pool.assign_seat(uid)
             try:
-                mapping.update_fields(uid, status=ACTIVE, tier=tier_key)
-            except Exception:
+                mapping.update_fields(uid, status=ACTIVE)
+            except Exception:  # noqa: BLE001
                 logger.warning("reactivate: mapping snapshot update failed for %s", uid)
-            results.append({"user_id": uid, "success": True, "error": "", "tier": tier_key})
-        except Exception as exc:
-            results.append({"user_id": uid, "success": False, "error": str(exc), "tier": ""})
-    _invalidate_live_cache()
+            results.append({"user_id": uid, "success": True, "error": "",
+                            "warning": "" if ok else _seat_warning(reason)})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"user_id": uid, "success": False, "error": str(exc), "warning": ""})
     return results
 
 
-def bulk_cancel(user_ids: list[str], mode: str = DEFAULT_DELETION_MODE) -> list[dict]:
-    """批量取消订阅 + 删 IDC 用户 + 删 DynamoDB 映射（副账号回收）。
+def bulk_cancel(user_ids: list[str]) -> list[dict]:
+    """回收 = 移出积分池 + 清个人上限 + 删 IDC 用户 + 删映射（副账号回收，不可逆）。
 
-    三件事必须同步，否则映射表会残留孤儿记录（IDC 已删但映射还在），
-    导致 dashboard 显示幽灵账号、对其升级/操作报 USER not found。
-    取消订阅时 ResourceNotFound 视为成功（幂等）。mode 见 DELETION_MODES：
-    回收场景通常选 immediate（用户随即被删，END_OF_PERIOD 的「保留访问到月底」无意义）。
+    四件事一起做，避免残留孤儿记录（IDC 已删但映射还在 → 界面出现幽灵账号）。
     """
     from app.mapping_store import MappingStore
 
-    region = settings.aws_region
-    session = get_session()
-    id_store = get_identity_store_id(session)
-    idc = session.client("identitystore", region_name=region)
-    creds = get_frozen_credentials()
+    idc, id_store = _idc()
     mapping = MappingStore()
+    personal_limits = set()
+    try:
+        personal_limits = {x["scope_id"] for x in pool.list_limits(force=True)
+                           if x["scope"] == "USER"}
+    except Exception:  # noqa: BLE001
+        logger.warning("bulk_cancel: list_limits failed, skip limit cleanup")
     results = []
     for uid in user_ids:
         try:
-            _delete_assignment(uid, creds, region, mode)
+            pool.remove_member(uid)
+            if uid in personal_limits:
+                try:
+                    pool.set_limit("USER", uid, None)
+                except Exception:  # noqa: BLE001
+                    logger.warning("bulk_cancel: clear limit failed for %s", uid)
             idc.delete_user(IdentityStoreId=id_store, UserId=uid)
-            mapping.delete(uid)  # 同步清映射，避免孤儿记录
+            mapping.delete(uid)
             results.append({"user_id": uid, "success": True, "error": ""})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             results.append({"user_id": uid, "success": False, "error": str(exc)})
-    _invalidate_live_cache()
     return results
+
+
+# ---------------------------------------------------------------------------
+# 实况
+# ---------------------------------------------------------------------------
+
+def live_status_map(force: bool = False) -> dict:
+    """池内实况 {user_id: {"status": SEATED / AWAITING_SEAT, "direct": bool}}；不在 dict = 不在池里。
+
+    映射表里的 status 是平台操作时的快照，管理员在控制台直接移出 / 加入不会回写映射表，以此为准。
+    失败抛异常，由调用方降级。
+    """
+    return pool.member_status_map(force=force)

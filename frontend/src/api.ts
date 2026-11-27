@@ -24,24 +24,33 @@ api.interceptors.response.use(
   }
 )
 
+// 积分池状态：SEATED 已占座 / AWAITING_SEAT 等待席位 / null 不在积分池
+export type PoolStatus = 'SEATED' | 'AWAITING_SEAT' | null
+// 生效上限来源：USER 个人 / GROUP 组 / POOL profile 默认 / NONE 无上限 / null 查询失败
+export type LimitScope = 'USER' | 'GROUP' | 'POOL' | 'NONE' | null
+
 export interface Account {
   kiro_user_id: string
   kiro_username: string
   kiro_email: string
-  tier: string
   team: string
   status: string
   account_role: string
+  usage_limit: number | null   // 个人上限快照（平台设置时记录）
   live_synced: boolean
-  live_status: string | null
-  live_tier: string | null
+  pool_status: PoolStatus
+  limit: number | null         // 生效上限（credits / 月）
+  limit_scope: LimitScope
+  month_credits: number | null // 本月已用（User Activity Report，日级延迟）
 }
 
-// 有效状态：实况优先（控制台退订不回写映射表，快照会滞后）；CANCELLED 不算有效
-export const isAccountActive = (a: Account) =>
-  a.live_synced
-    ? a.live_status != null && a.live_status !== 'CANCELLED'
-    : a.status === 'active'
+// 有效 = 在积分池里（实况优先；控制台直接移出不会回写映射表）
+export const isAccountActive = (a: { live_synced: boolean; pool_status: PoolStatus; status: string }) =>
+  a.live_synced ? a.pool_status != null : a.status === 'active'
+
+export const LIMIT_SCOPE_LABEL: Record<string, string> = {
+  USER: '个人上限', GROUP: '组上限', POOL: 'profile 默认', NONE: '无上限',
+}
 
 export interface Me {
   open_id: string
@@ -66,7 +75,8 @@ export interface ReqItem {
 
 export const getMe = () => api.get<Me>('/api/auth/me').then((r) => r.data)
 export const applyAccount = (data: any) => api.post('/api/requests/apply', data)
-export const upgradeAccount = (data: any) => api.post('/api/requests/upgrade', data)
+export const requestLimitChange = (data: { kiro_user_id: string; requested_limit: number; reason?: string }) =>
+  api.post('/api/requests/limit-change', data)
 export const quotaIncrease = (data: any) => api.post('/api/requests/quota-increase', data)
 export const myRequests = () => api.get<ReqItem[]>('/api/requests/mine').then((r) => r.data)
 export const getGroups = () => api.get<string[]>('/api/requests/groups').then((r) => r.data)
@@ -83,43 +93,32 @@ export interface AccountRow {
   kiro_username: string
   kiro_email: string
   team: string
-  tier: string
   status: string
   account_role: string
+  usage_limit: number | null
+  // 积分池实况（live_synced=false 时不可信，回退快照）
   live_synced: boolean
-  live_status: string | null
-  live_tier: string | null
+  pool_status: PoolStatus
+  pool_direct: boolean | null
+  // 生效上限
+  limit: number | null
+  limit_scope: LimitScope
+  limit_used_pct: number | null
+  // 用量（User Activity Report；null = 报表不可用）
   usage_messages: number | null
   usage_credits: number | null
-  usage_conversations: number | null
   usage_last_active: string | null
   usage_active_days: number | null
-  // 费用/额度（计费口径，直读订阅计费服务；null = 查询失败或无订阅记录）
-  billing_synced: boolean
-  billing_error: string
-  billing_plan_code: string | null
-  billing_plan_start: string | null
-  billing_current_charges: number | null
-  billing_currency: string
-  billing_account_status: string | null
-  billing_pending_plan: string | null
-  billing_pending_scheduled: string | null
-  billing_credit_limit: number | null
-  billing_overage_rate: number | null
-  // 本月活动（User Activity Report 本月聚合）；null = 报表不可用
-  usage_month_messages: number | null
-  usage_month_active_days: number | null
-  usage_month_last_active: string | null
-  // 本月已用 / 超额 credits：User Activity Report 本月聚合（活动口径，日级）；null = 报表不可用
-  billing_credit_used: number | null
-  billing_credit_used_source: 'athena_mtd' | null
-  billing_overage_credits: number | null
-  billing_overage_charges: number | null   // 预估 = 超额 credits × 单价
-  // 订阅计费服务返回的用量字段（仅参考）
-  billing_reported_credit_used: number | null
-  billing_reported_overage_charges: number | null
+  month_credits: number | null
+  month_messages: number | null
+  month_active_days: number | null
+  month_last_active: string | null
 }
-export interface BillingHistory {
+export const getAccounts = (force = false) =>
+  api.get<AccountRow[]>('/api/admin/accounts', { params: force ? { force: true } : {} })
+    .then((r) => r.data)
+
+export interface UsageHistory {
   user_id: string
   year: number
   month: number
@@ -127,67 +126,94 @@ export interface BillingHistory {
   available: boolean
   has_usage_entry: boolean
   credit_used: number | null
-  overage_credits: number | null
-  overage_rate: number
-  overage_charges_est: number | null
   messages: number | null
   active_days: number | null
   last_active: string | null
-  credit_limit: number | null
-  plan_code: string | null
 }
-export const getBillingHistory = (kiro_user_id: string, year: number, month: number) =>
-  api.get<BillingHistory>(`/api/admin/accounts/${kiro_user_id}/billing-history`, { params: { year, month } })
-    .then((r) => r.data)
-export const getAccounts = (force = false) =>
-  api.get<AccountRow[]>('/api/admin/accounts', { params: force ? { force: true } : {} })
+export const getUsageHistory = (kiro_user_id: string, year: number, month: number) =>
+  api.get<UsageHistory>(`/api/admin/accounts/${kiro_user_id}/usage-history`, { params: { year, month } })
     .then((r) => r.data)
 
-export interface OverageCap {
-  value: number
-  quota_name: string
-  adjustable: boolean
-  region: string
+// ---- 积分池总览 ----
+export interface AddonItem {
+  id: string
+  quantity: number
+  used: number
+  left: number
+  source: string | null
+  purchased_at: string | null
+  expires_at: string | null
+}
+export interface PoolBalance {
+  payment_model: 'PREPAID' | 'POSTPAID'
+  prepaid: boolean
+  cycle_start: string
+  cycle_end: string
+  days_left: number
+  monthly: { quantity: number; used: number; left: number; seat_count: number; credits_per_seat: number }
+  addon: { quantity: number; used: number; left: number; expiring_this_cycle: number; items: AddonItem[] }
+  total_quantity: number
+  total_left: number
+  avg_daily_used: number
+  rate_is_lower_bound: boolean
+  monthly_runout_at: string | null
+  pool_runout_at: string | null
+  seat_price_usd: number
+  seat_fee_full_month_usd: number
+  addon_credit_price_usd: number
+}
+export interface PoolSeats {
+  seated: number | null
+  awaiting: number | null
+  total: number | null       // 后付池为 null
+  available: number | null   // 后付池为 null
+  pending_removal: number | null
+  pending_removal_effective: number | null
+}
+export interface QuotaItem { code: string; name: string; value: number | null; adjustable: boolean; console_url: string }
+export interface PoolInfo {
+  errors: string[]
   console_url: string
+  context: { payment_model: 'PREPAID' | 'POSTPAID'; prepaid: boolean; region: string; account_id: string } | null
+  balance?: PoolBalance | null
+  seats?: PoolSeats | null
+  profile_limit?: number | null
+  purchases?: { id: string; quantity: number; status: string; source: string; created_at: string; expires_at: string }[] | null
+  quotas?: { onboarding_cap: QuotaItem | null; monthly_purchase_cap: QuotaItem | null } | null
 }
-export interface OverageCapPending {
-  desired_value: number
-  status: string
-  requested_at: string
-}
-export interface OverageCapInfo {
-  cap: OverageCap | null
-  pending: OverageCapPending | null
-}
-export const getOverageCap = () =>
-  api.get<OverageCapInfo>('/api/admin/overage-cap').then((r) => r.data)
-export const raiseOverageCap = (desired_value: number) =>
-  api.post('/api/admin/overage-cap', { desired_value })
+export const getPool = (force = false) =>
+  api.get<PoolInfo>('/api/admin/pool', { params: force ? { force: true } : {} }).then((r) => r.data)
+
+export interface LimitItem { scope: 'USER' | 'GROUP' | 'POOL'; scope_id: string; limit: number | null; effective_from: number | null }
+export const getLimits = (force = false) =>
+  api.get<LimitItem[]>('/api/admin/limits', { params: force ? { force: true } : {} }).then((r) => r.data)
+// usage_limit=null 表示删除；0 表示禁止使用
+export const setLimit = (scope: 'USER' | 'POOL', scope_id: string, usage_limit: number | null) =>
+  api.post('/api/admin/limits', { scope, scope_id, usage_limit })
+
 export const createGroup = (group_name: string) =>
   api.post('/api/admin/groups', { group_name })
 
-// 停用 / 回收（对应 Kiro 控制台「Deactivate Kiro plan」的两个选项）
-export type DeletionMode = 'end_of_period' | 'immediate'
-export interface DeactivateResult {
+// ---- 停用（移出积分池）/ 回收 / 恢复 / 重新分配席位 ----
+export interface BatchResult {
   user_id: string
   username: string
   success: boolean
   error: string
+  warning?: string
 }
-export interface DeactivateResponse {
-  mode: DeletionMode
-  recycle: boolean
-  results: DeactivateResult[]
+export interface BatchResponse {
+  recycle?: boolean
+  results: BatchResult[]
   succeeded: number
   failed: number
 }
-export const deactivateAccounts = (kiro_user_ids: string[], mode: DeletionMode, recycle = false) =>
-  api.post<DeactivateResponse>('/api/admin/accounts/deactivate', { kiro_user_ids, mode, recycle })
-    .then((r) => r.data)
-// 恢复订阅（撤销月底停用）：对 CANCELLED 账号按原套餐重新订阅
+export const deactivateAccounts = (kiro_user_ids: string[], recycle = false) =>
+  api.post<BatchResponse>('/api/admin/accounts/deactivate', { kiro_user_ids, recycle }).then((r) => r.data)
 export const reactivateAccounts = (kiro_user_ids: string[]) =>
-  api.post<DeactivateResponse>('/api/admin/accounts/reactivate', { kiro_user_ids })
-    .then((r) => r.data)
+  api.post<BatchResponse>('/api/admin/accounts/reactivate', { kiro_user_ids }).then((r) => r.data)
+export const retrySeats = (kiro_user_ids: string[]) =>
+  api.post<BatchResponse>('/api/admin/accounts/retry-seats', { kiro_user_ids }).then((r) => r.data)
 
 export interface UnlinkedAccount {
   kiro_user_id: string

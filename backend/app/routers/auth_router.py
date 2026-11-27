@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from app import feishu
@@ -16,27 +16,38 @@ from app.resolver import Resolver, suggest_new_username
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# state 防 CSRF（简单内存集合；多实例可换 Redis/签名 state）
-_states: set[str] = set()
+# OAuth state 防登录 CSRF：登录时把随机 state 写进 HttpOnly cookie，回调时要求 URL 里的 state
+# 与 cookie 一致。state 绑定发起登录的浏览器，且不依赖进程内存（多实例部署也成立）。
+_STATE_COOKIE = "kiro_oauth_state"
+_STATE_TTL = 600
+
+
+def _secure_cookie() -> bool:
+    return settings.feishu_redirect_uri.startswith("https://")
 
 
 @router.get("/feishu/login")
 def feishu_login():
-    state = secrets.token_urlsafe(16)
-    _states.add(state)
-    return RedirectResponse(feishu.oauth_authorize_url(state))
+    state = secrets.token_urlsafe(24)
+    resp = RedirectResponse(feishu.oauth_authorize_url(state))
+    resp.set_cookie(_STATE_COOKIE, state, max_age=_STATE_TTL, httponly=True, samesite="lax",
+                    secure=_secure_cookie(), path="/api/auth/feishu")
+    return resp
 
 
 @router.get("/feishu/callback")
-def feishu_callback(code: str, state: str = ""):
-    # state 校验（宽松：缺失也放行以便本地调试，可收紧）
-    _states.discard(state)
+def feishu_callback(request: Request, code: str, state: str = ""):
+    expected = request.cookies.get(_STATE_COOKIE, "")
+    if not state or not expected or not secrets.compare_digest(state, expected):
+        raise HTTPException(400, "登录状态校验失败，请从登录页重新发起飞书登录")
     info = feishu.oauth_exchange_user(code)
     if not info.get("open_id"):
         raise HTTPException(400, "OAuth 失败：未获取 open_id")
     token = issue_token(info["open_id"], info["name"])
-    # 重定向回前端并带 token
-    return RedirectResponse(f"{settings.frontend_url}/auth/callback?token={token}")
+    # token 放在 URL fragment（#）里：不会发给服务器，也不会出现在访问日志和 Referer 中
+    resp = RedirectResponse(f"{settings.frontend_url}/auth/callback#token={token}")
+    resp.delete_cookie(_STATE_COOKIE, path="/api/auth/feishu")
+    return resp
 
 
 @router.get("/me")

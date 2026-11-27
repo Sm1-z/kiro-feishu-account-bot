@@ -19,18 +19,30 @@ from app.config import settings
 _ALGO = "HS256"
 _TTL = 7 * 24 * 3600  # 7 天
 
+_MIN_SECRET_LEN = 32
+
 _bearer = HTTPBearer(auto_error=False)
+
+
+def _secret() -> str:
+    """签名密钥。未配置或过短时拒绝服务（fail closed）：空密钥签出的 token 任何人都能伪造。"""
+    secret = settings.jwt_secret or ""
+    if len(secret) < _MIN_SECRET_LEN:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            f"服务端未配置 JWT_SECRET（至少 {_MIN_SECRET_LEN} 个字符）")
+    return secret
 
 
 def issue_token(open_id: str, name: str) -> str:
     payload = {"sub": open_id, "name": name, "iat": int(time.time()),
                "exp": int(time.time()) + _TTL}
-    return jwt.encode(payload, settings.jwt_secret, algorithm=_ALGO)
+    return jwt.encode(payload, _secret(), algorithm=_ALGO)
 
 
 def _decode(token: str) -> dict:
+    secret = _secret()
     try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=[_ALGO])
+        return jwt.decode(token, secret, algorithms=[_ALGO])
     except jwt.PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"无效 token: {exc}")
 

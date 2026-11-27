@@ -28,7 +28,7 @@ USER = "ou_user"
 def client(monkeypatch):
     # 配置管理员 + jwt
     monkeypatch.setattr(settings, "admin_open_ids", ADMIN)
-    monkeypatch.setattr(settings, "jwt_secret", "test-secret")
+    monkeypatch.setattr(settings, "jwt_secret", "test-secret-0123456789abcdef0123456789")
     with mock_aws():
         ddb = boto3.client("dynamodb", region_name=REGION)
         ddb.create_table(
@@ -370,3 +370,59 @@ def test_billing_history_validation(client):
                       headers=_auth(ADMIN, "Admin")).status_code == 400
     assert client.get("/api/admin/accounts/u1/billing-history?year=2026&month=10",
                       headers=_auth(USER, "张三")).status_code == 403
+
+
+# ---- 安全回归 ----
+
+def test_static_resolver_blocks_traversal(tmp_path):
+    from app.main import resolve_static
+    root = tmp_path / "static"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("ok")
+    (tmp_path / ".env").write_text("FEISHU_APP_SECRET=leak")
+    assert resolve_static(str(root), "index.html") == str((root / "index.html").resolve())
+    assert resolve_static(str(root), "../.env") is None
+    assert resolve_static(str(root), "assets/../../.env") is None
+    assert resolve_static(str(root), "/etc/hosts") is None
+    assert resolve_static(str(root), "missing.js") is None
+    assert resolve_static(str(root), "") is None
+
+
+def test_short_jwt_secret_fails_closed(client, monkeypatch):
+    token_headers = _auth(USER, "张三")  # 用合法密钥签出的 token
+    monkeypatch.setattr(settings, "jwt_secret", "")
+    assert client.get("/api/auth/me", headers=token_headers).status_code == 503
+    from fastapi import HTTPException
+    from app.auth import issue_token
+    with pytest.raises(HTTPException):
+        issue_token(USER, "张三")  # 空密钥不签发
+
+
+def test_oauth_callback_requires_matching_state_cookie(client):
+    with patch("app.routers.auth_router.feishu.oauth_exchange_user",
+               return_value={"open_id": USER, "name": "张三"}) as ex:
+        # 没有 cookie：拒绝，且不去换 code
+        r = client.get("/api/auth/feishu/callback?code=c1&state=s1", follow_redirects=False)
+        assert r.status_code == 400
+        ex.assert_not_called()
+        # cookie 与 state 不一致：拒绝
+        client.cookies.set("kiro_oauth_state", "other", path="/api/auth/feishu")
+        assert client.get("/api/auth/feishu/callback?code=c1&state=s1",
+                          follow_redirects=False).status_code == 400
+        # 一致：发 token，token 只出现在 fragment 里
+        client.cookies.clear()
+        client.cookies.set("kiro_oauth_state", "s1", path="/api/auth/feishu")
+        ok = client.get("/api/auth/feishu/callback?code=c1&state=s1", follow_redirects=False)
+    assert ok.status_code in (302, 307)
+    loc = ok.headers["location"]
+    assert "/auth/callback#token=" in loc and "?token=" not in loc
+
+
+def test_oauth_login_sets_state_cookie(client):
+    with patch("app.routers.auth_router.feishu.oauth_authorize_url",
+               side_effect=lambda st: f"https://open.feishu.cn/authorize?state={st}"):
+        r = client.get("/api/auth/feishu/login", follow_redirects=False)
+    cookie = r.headers.get("set-cookie", "")
+    assert "kiro_oauth_state=" in cookie and "HttpOnly" in cookie and "samesite=lax" in cookie.lower()
+    state = cookie.split("kiro_oauth_state=")[1].split(";")[0]
+    assert r.headers["location"].endswith(f"state={state}")

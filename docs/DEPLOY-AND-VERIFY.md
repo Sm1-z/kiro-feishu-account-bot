@@ -116,8 +116,10 @@ cd backend && cp .env.example .env
 ```bash
 cd frontend && npm install && npm run build   # 产物进 backend/static
 cd ../backend && pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8000   # 只监听本机
 ```
+> 对外访问：在同一台机器上用 HTTPS 反向代理（nginx / Caddy）或前置 ALB 把 443 转到 127.0.0.1:8000，
+> 安全组只放行公司出口 IP / VPN 网段到 443；不要把 8000 端口直接对 0.0.0.0/0 开放，也不要用 `--host 0.0.0.0`。
 - [ ] 验证：日志出现「飞书 WebSocket 长连接客户端已启动」
 - [ ] 验证：`curl localhost:8000/api/health` → `{"status":"ok"}`
 - [ ] 验证：浏览器开 `http://localhost:8000/` 看到登录页

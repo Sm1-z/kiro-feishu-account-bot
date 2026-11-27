@@ -57,10 +57,10 @@ from app.mapping_store import AccountMapping, MappingStore
 from app.request_store import Request, RequestStore
 
 store = MappingStore()
-# (uid, open_id, 姓名, 用户名, 邮箱, 分组, 个人上限快照, 主/副)
+# (uid, open_id, 姓名, 用户名, 邮箱, 分组, 个人上限快照, 角色；每人一个账号)
 DEMO_ACCOUNTS = [
     ("u-001", "ou_demo_admin", "张三", "zhangsan", "zhangsan@example.com", "Team-Backend", 1500, "primary"),
-    ("u-002", "ou_demo_admin", "张三", "zhangsan-new1", "zhangsan+2@example.com", "Team-Backend", None, "secondary"),
+    ("u-002", "ou_qianqi", "钱七", "qianqi", "qianqi@example.com", "Team-Backend", None, "primary"),
     ("u-003", "ou_lisi", "李四", "lisi", "lisi@example.com", "Team-Frontend", None, "primary"),
     ("u-004", "ou_wangwu", "王五", "wangwu", "wangwu@example.com", "Team-Algo", 800, "primary"),
     ("u-005", "ou_zhaoliu", "赵六", "zhaoliu", "zhaoliu@example.com", "Team-Frontend", None, "primary"),
@@ -72,18 +72,18 @@ for uid, oid, name, uname, email, team, limit, role in DEMO_ACCOUNTS:
         status="active", account_role=role))
 
 reqs = RequestStore()
-reqs.create(Request(user_open_id="ou_lisi", user_name="李四", type="apply", status="pending",
-                    payload={"username": "lisi-new1", "email": "lisi+2@example.com",
+reqs.create(Request(user_open_id="ou_zhouba", user_name="周八", type="apply", status="pending",
+                    payload={"username": "zhouba", "email": "zhouba@example.com",
                              "group": "Team-Frontend", "usage_limit": None,
-                             "reason": "前端组件库迁移，需要单独的测试账号"}))
+                             "reason": "新入职，负责前端组件库迁移"}))
 reqs.create(Request(user_open_id="ou_wangwu", user_name="王五", type="limit_change", status="pending",
                     kiro_user_id="u-004",
                     payload={"username": "wangwu", "requested_limit": 1500, "current_limit": 800,
                              "reason": "训练脚本重构，本月已用到 80%"}))
-reqs.create(Request(user_open_id="ou_zhaoliu", user_name="赵六", type="apply", status="rejected",
-                    payload={"username": "zhaoliu-new1", "email": "z6@example.com",
+reqs.create(Request(user_open_id="ou_sunqi", user_name="孙七", type="apply", status="rejected",
+                    payload={"username": "sunqi-new", "email": "sunqi+2@example.com",
                              "group": "Team-Algo", "usage_limit": 3000},
-                    review_comment="请先使用现有账号，主账号还在等待席位"))
+                    review_comment="IDC 里已有你的存量账号，管理员会直接绑定给你"))
 reqs.create(Request(user_open_id="ou_demo_admin", user_name="张三", type="limit_set",
                     status="executed", payload={"scope": "POOL", "username": "", "from": "None", "to": "600"},
                     result={"ok": True}))

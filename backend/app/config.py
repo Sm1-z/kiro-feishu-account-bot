@@ -48,9 +48,6 @@ class Settings(BaseSettings):
     athena_output_bucket: str = Field(default="")
     glue_table_name: str = Field(default="")  # 空则从 Glue 库自动发现首张表
 
-    # ---- 账号配额 ----
-    default_account_quota: int = Field(default=2)
-
     # ---- 飞书 ----
     feishu_app_id: str = Field(default="")
     feishu_app_secret: str = Field(default="")

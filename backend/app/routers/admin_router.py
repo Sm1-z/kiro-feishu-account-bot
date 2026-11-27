@@ -363,12 +363,13 @@ def _known_feishu_users() -> list[dict]:
         if m.feishu_open_id and m.feishu_open_id not in users:
             users[m.feishu_open_id] = {
                 "open_id": m.feishu_open_id, "name": m.feishu_name,
-                "email": m.kiro_email,
+                "email": m.kiro_email, "has_account": True,  # 每人一个账号：已有账号的不能再绑
             }
     for r in RequestStore().list_by_status():
         if r.user_open_id and r.user_open_id not in users:
             users[r.user_open_id] = {
                 "open_id": r.user_open_id, "name": r.user_name, "email": "",
+                "has_account": False,
             }
     return list(users.values())
 
@@ -378,7 +379,9 @@ def list_unlinked(_: CurrentUser = Depends(require_admin)):
     """存量导入①：IDC 游离账号（未在映射表中）+ 归属建议。管理员点按钮触发。"""
     from app.resolver import ImportService
 
-    return ImportService().list_unlinked(known_users=_known_feishu_users())
+    # 归属建议只在还没有账号的飞书用户里找（每人一个账号）
+    return ImportService().list_unlinked(
+        known_users=[u for u in _known_feishu_users() if not u.get("has_account")])
 
 
 @router.get("/feishu-users")
@@ -405,12 +408,15 @@ def link_unlinked(body: ImportLinkIn, _: CurrentUser = Depends(require_admin)):
 
 @router.post("/link")
 def manual_link(body: ManualLinkIn, _: CurrentUser = Depends(require_admin)):
-    from app.resolver import Resolver
-    m = Resolver().manual_link(
-        kiro_user_id=body.kiro_user_id, feishu_open_id=body.feishu_open_id,
-        feishu_name=body.feishu_name, kiro_username=body.kiro_username,
-        kiro_email=body.kiro_email,
-    )
+    from app.resolver import AccountAlreadyLinked, Resolver
+    try:
+        m = Resolver().manual_link(
+            kiro_user_id=body.kiro_user_id, feishu_open_id=body.feishu_open_id,
+            feishu_name=body.feishu_name, kiro_username=body.kiro_username,
+            kiro_email=body.kiro_email,
+        )
+    except AccountAlreadyLinked as exc:
+        raise HTTPException(400, str(exc))
     return m.__dict__
 
 

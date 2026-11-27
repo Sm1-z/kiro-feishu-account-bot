@@ -30,10 +30,6 @@ class LimitChangeIn(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
-class QuotaIn(BaseModel):
-    requested_quota: int = Field(gt=0)
-
-
 class ReviewIn(BaseModel):
     comment: str = ""
 

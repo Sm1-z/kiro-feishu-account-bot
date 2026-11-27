@@ -14,7 +14,7 @@ from moto import mock_aws
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.config import settings  # noqa: E402
-from app.mapping_store import MappingStore, PRIMARY, SECONDARY  # noqa: E402
+from app.mapping_store import MappingStore, PRIMARY  # noqa: E402
 from app.request_store import (  # noqa: E402
     APPLY, APPROVED, EXECUTED, FAILED, LIMIT_CHANGE, PENDING, Request, RequestStore,
 )
@@ -95,24 +95,21 @@ def test_execute_apply_success_writes_mapping(stores):
     assert m.usage_limit == 800
 
 
-def test_second_account_is_secondary(stores):
-    """同人第二个账号 → secondary。"""
+def test_second_apply_blocked_before_provisioning(stores):
+    """每人一个账号：已有账号的人再有申请被通过，开通前就失败，不调 provision。"""
     svc = stores
-    # 先开通主账号
     r1 = _apply_req(svc, username="zhangsan")
     svc.claim_approve(r1.request_id, "ou_admin")
     with patch("app.approval.provisioner.provision",
                return_value=MagicMock(success=True, user_id="u1", warning="", steps_succeeded=[])):
         svc.execute_approved(r1.request_id)
-    # 再开通副账号
     r2 = _apply_req(svc, username="zhangsan-new1", email="l2@x.com")
     svc.claim_approve(r2.request_id, "ou_admin")
-    with patch("app.approval.provisioner.provision",
-               return_value=MagicMock(success=True, user_id="u2", warning="", steps_succeeded=[])):
-        svc.execute_approved(r2.request_id)
-
+    with patch("app.approval.provisioner.provision") as prov:
+        done = svc.execute_approved(r2.request_id)
+    prov.assert_not_called()
+    assert done.status == FAILED and "每人只能有一个账号" in done.result["error"]
     assert svc.mapping.get("u1").account_role == PRIMARY
-    assert svc.mapping.get("u2").account_role == SECONDARY
 
 
 def test_execute_apply_failure_no_mapping(stores):

@@ -20,7 +20,7 @@ from app import cards, feishu, provisioner
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import (
-    APPLY, APPROVED, EXECUTED, FAILED, LIMIT_CHANGE, PENDING, QUOTA_INCREASE, REJECTED,
+    APPLY, APPROVED, EXECUTED, FAILED, LIMIT_CHANGE, PENDING, REJECTED,
     Request, RequestStore,
 )
 from app.resolver import Resolver
@@ -66,13 +66,17 @@ class ApprovalService:
             self._exec_apply(req)
         elif req.type == LIMIT_CHANGE:
             self._exec_limit_change(req)
-        elif req.type == QUOTA_INCREASE:
-            self._exec_quota(req)
 
         return self.requests.get(request_id)
 
     def _exec_apply(self, req: Request) -> None:
         p = req.payload
+        existing = self.mapping.list_by_feishu(req.user_open_id)
+        if existing:  # 每人一个账号：两条申请同时被通过时，第二条在开通前拦下，不留孤儿 IDC 用户
+            self.requests.update_fields(req.request_id, status=FAILED, result={
+                "error": f"该飞书用户已有 Kiro 账号（{existing[0].kiro_username}），每人只能有一个账号，本次未开通",
+                "error_step": "validate"})
+            return
         result = provisioner.provision(
             username=p["username"], email=p["email"],
             given_name=p.get("given_name", ""), family_name=p.get("family_name", ""),
@@ -116,12 +120,6 @@ class ApprovalService:
         else:
             self.requests.update_fields(
                 req.request_id, status=FAILED, result={"error": result.error})
-
-    def _exec_quota(self, req: Request) -> None:
-        # 配额变更不涉及 AWS，直接记录（实际配额存于 user 维度，见路由层）
-        self.requests.update_fields(
-            req.request_id, status=EXECUTED,
-            result={"new_quota": req.payload.get("requested_quota")})
 
     # ---- 通知（卡片更新 + 通知申请人）----
 

@@ -56,8 +56,7 @@ export interface Me {
   open_id: string
   name: string
   is_admin: boolean
-  quota: number
-  accounts: Account[]
+  accounts: Account[]   // 积分池版每人最多一个账号
   suggested_username: string
 }
 
@@ -77,7 +76,6 @@ export const getMe = () => api.get<Me>('/api/auth/me').then((r) => r.data)
 export const applyAccount = (data: any) => api.post('/api/requests/apply', data)
 export const requestLimitChange = (data: { kiro_user_id: string; requested_limit: number; reason?: string }) =>
   api.post('/api/requests/limit-change', data)
-export const quotaIncrease = (data: any) => api.post('/api/requests/quota-increase', data)
 export const myRequests = () => api.get<ReqItem[]>('/api/requests/mine').then((r) => r.data)
 export const getGroups = () => api.get<string[]>('/api/requests/groups').then((r) => r.data)
 export const adminRequests = (status?: string) =>
@@ -228,6 +226,7 @@ export interface FeishuUser {
   open_id: string
   name: string
   email: string
+  has_account?: boolean  // 每人一个账号：已有账号的不能再绑定
 }
 export const getUnlinked = () =>
   api.get<UnlinkedAccount[]>('/api/admin/unlinked').then((r) => r.data)

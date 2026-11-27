@@ -15,7 +15,7 @@
     request_id    (PK)   uuid
     user_open_id         申请人飞书 open_id
     user_name            申请人飞书姓名（快照）
-    type                 apply / limit_change / quota_increase / limit_set / deactivate / recycle / reactivate / seat_retry
+    type                 apply / limit_change / limit_set / deactivate / recycle / reactivate / seat_retry
     status               pending / approved / executed / failed / rejected
     payload              申请详情（dict）
     result               执行结果（dict：user_id+steps 或 error）
@@ -46,7 +46,6 @@ REJECTED = "rejected"
 # 类型常量
 APPLY = "apply"                  # 员工申请开通（加入积分池）
 LIMIT_CHANGE = "limit_change"    # 员工申请调整个人用量上限（审批后 SetUsageLimit）
-QUOTA_INCREASE = "quota_increase"
 LIMIT_SET = "limit_set"          # 管理员直接设置 / 删除上限（用户 / profile 默认；即时执行，纯审计记录）
 DEACTIVATE = "deactivate"        # 管理员停用 = 移出积分池（保留 IDC 用户 / 映射；即时执行，纯审计记录）
 RECYCLE = "recycle"              # 管理员回收（移出池 + 删 IDC 用户 + 删映射；即时执行，纯审计记录）

@@ -20,7 +20,7 @@
     kiro_email
     usage_limit           个人用量上限快照（credits / 账期；空 = 走组上限或 profile 默认）
     status                active / cancelled（cancelled = 已移出积分池，IDC 用户保留）
-    account_role          primary / secondary   ★ 主副维度
+    account_role          primary（积分池版一人一个账号，统一为 primary；secondary 仅兼容旧数据）
     retention             permanent / monthly    ★ 由 role 推导
     approved_by           审批人 open_id（审计）
     created_at / updated_at
@@ -60,7 +60,7 @@ class AccountMapping:
     kiro_email: str = ""
     usage_limit: int | None = None
     status: str = "active"
-    account_role: str = SECONDARY
+    account_role: str = PRIMARY
     retention: str = MONTHLY
     approved_by: str = ""
     created_at: int = field(default_factory=_now)

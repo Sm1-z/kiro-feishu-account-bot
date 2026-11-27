@@ -145,18 +145,31 @@ def test_apply_duplicate_email_blocked(client):
     assert "邮箱" in r.json()["detail"]
 
 
-def test_apply_no_account_quota_limit(client):
-    """不限制每人账号数：已有 3 个账号仍可继续申请。"""
+def test_apply_blocked_when_user_has_account(client):
+    """每人一个账号：已有账号（包括已停用的）不能再申请。"""
     from app.mapping_store import AccountMapping, MappingStore
-    store = MappingStore()
-    for i in range(3):
-        store.put(AccountMapping(kiro_user_id=f"u{i}", feishu_open_id=USER,
-                                 kiro_username=f"existing{i}", kiro_email=f"e{i}@x.com",
-                                 status="active"))
+    MappingStore().put(AccountMapping(kiro_user_id="u0", feishu_open_id=USER, kiro_username="zhangsan",
+                                      kiro_email="zs@x.com", status="cancelled"))
     r = client.post("/api/requests/apply", headers=_auth(USER, "张三"), json={
         "username": "zhangsan-extra", "email": "extra@x.com"})
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "pending"
+    assert r.status_code == 400 and "每人只能有一个账号" in r.json()["detail"]
+
+
+def test_apply_blocked_when_apply_pending(client):
+    ok = client.post("/api/requests/apply", headers=_auth(USER, "张三"),
+                     json={"username": "zhangsan", "email": "li@x.com"})
+    assert ok.status_code == 200
+    again = client.post("/api/requests/apply", headers=_auth(USER, "张三"),
+                        json={"username": "zhangsan2", "email": "li2@x.com"})
+    assert again.status_code == 400 and "处理中" in again.json()["detail"]
+
+
+def test_admin_manual_link_blocks_second_account(client):
+    from app.mapping_store import AccountMapping, MappingStore
+    MappingStore().put(AccountMapping(kiro_user_id="u0", feishu_open_id=USER, kiro_username="zhangsan"))
+    r = client.post("/api/admin/link", headers=_auth(ADMIN, "Admin"), json={
+        "kiro_user_id": "u9", "feishu_open_id": USER, "kiro_username": "zhangsan-legacy"})
+    assert r.status_code == 400 and "每人只能有一个账号" in r.json()["detail"]
 
 
 def test_approve_dedup_via_api(client):

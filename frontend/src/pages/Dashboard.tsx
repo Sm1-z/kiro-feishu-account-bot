@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, Card, Table, Tag, Modal, Form, Input, InputNumber, Select, message, Space,
-  Typography, Layout, Empty,
+  Typography, Layout, Empty, Tooltip,
 } from 'antd'
 import {
   getMe, applyAccount, requestLimitChange, myRequests, getGroups, isAccountActive,
@@ -14,9 +14,6 @@ import {
 
 const { Header, Content } = Layout
 const { Title } = Typography
-
-const roleTag = (r: string) =>
-  r === 'primary' ? <Tag color="gold">主账号</Tag> : <Tag>副账号</Tag>
 
 const poolTag = (a: Account) => {
   if (!a.live_synced)
@@ -40,7 +37,7 @@ const usedText = (a: Account) => {
     {a.limit ? ` / ${a.limit.toLocaleString()}` : ''}</span>
 }
 
-const REQ_LABEL: Record<string, string> = { apply: '开通', limit_change: '调整上限', quota_increase: '配额' }
+const REQ_LABEL: Record<string, string> = { apply: '开通', limit_change: '调整上限' }
 const reqDetail = (r: ReqItem) => {
   const p = r.payload || {}
   if (r.type === 'apply')
@@ -73,7 +70,9 @@ export default function Dashboard() {
   // 分组从 IDC 动态拉取（失败时后端已降级为默认组）
   useEffect(() => { getGroups().then(setGroups).catch(() => setGroups([])) }, [])
 
-  const activeCount = me ? me.accounts.filter(isAccountActive).length : 0
+  // 每人一个账号：已有账号（含已停用）就不能再申请；停用的找管理员恢复
+  const hasAccount = !!me && me.accounts.length > 0
+  const pendingApply = reqs.some((r) => r.type === 'apply' && (r.status === 'pending' || r.status === 'approved'))
 
   const submitApply = async () => {
     const v = await form.validateFields()
@@ -98,7 +97,6 @@ export default function Dashboard() {
     { title: '用户名', dataIndex: 'kiro_username' },
     { title: '邮箱', dataIndex: 'kiro_email' },
     { title: '分组', dataIndex: 'team' },
-    { title: '类型', dataIndex: 'account_role', render: roleTag },
     { title: '状态', render: (_: any, r: Account) => poolTag(r) },
     { title: '本月上限（credits）', render: (_: any, r: Account) => limitText(r) },
     { title: <span title="来自 Kiro 用量报表，约有 1 天延迟">本月已用</span>, render: (_: any, r: Account) => usedText(r) },
@@ -140,22 +138,25 @@ export default function Dashboard() {
       </Header>
       <Content style={{ padding: 24 }}>
         <Card
-          title={`我的 Kiro 账号（${activeCount} 个可用）`}
+          title="我的 Kiro 账号"
           extra={
             <Space>
               <Button loading={refreshing} onClick={load}>刷新</Button>
-              <Button type="primary" onClick={() => {
-                form.setFieldsValue({ username: me?.suggested_username })
-                setApplyOpen(true)
-              }}>
-                申请账号
-              </Button>
+              <Tooltip title={hasAccount ? '每人一个 Kiro 账号；账号被停用请联系管理员恢复'
+                : pendingApply ? '你的开通申请正在审批中' : ''}>
+                <Button type="primary" disabled={hasAccount || pendingApply} onClick={() => {
+                  form.setFieldsValue({ username: me?.suggested_username })
+                  setApplyOpen(true)
+                }}>
+                  申请账号
+                </Button>
+              </Tooltip>
             </Space>
           }
           style={{ marginBottom: 24 }}
         >
           <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
-            公司的 Kiro credits 由所有人共享（积分池）。每个账号每月最多能用到「本月上限」；用完后当月暂停，下月 1 日（UTC）重置，或申请调整上限。
+            公司的 Kiro credits 由所有人共享（积分池），每人一个账号。每个账号每月最多能用到「本月上限」；用完后当月暂停，下月 1 日（UTC）重置，或申请调整上限。
           </Typography.Paragraph>
           <Table rowKey="kiro_user_id" dataSource={me?.accounts || []} columns={acctCols}
             pagination={false} locale={{ emptyText: <Empty description="还没有账号，点右上角申请" /> }} />

@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""申请路由（普通用户）：开通（加入积分池）/ 调整用量上限 / 配额 + 我的申请。
+"""申请路由（普通用户）：开通（加入积分池，每人一个账号）/ 调整用量上限 + 我的申请。
 
 提交时做前置校验（设计 PRD §3.4）：配额、用户名占用、邮箱唯一。
 提交后推飞书审批卡片给所有管理员，记录 message_id 供审批后更新卡片。
@@ -17,9 +17,9 @@ from app.auth import CurrentUser, current_user
 from app.config import settings
 from app.mapping_store import MappingStore
 from app.request_store import (
-    APPLY, LIMIT_CHANGE, QUOTA_INCREASE, Request, RequestStore,
+    APPLY, APPROVED, LIMIT_CHANGE, PENDING, Request, RequestStore,
 )
-from app.schemas import ApplyIn, LimitChangeIn, QuotaIn
+from app.schemas import ApplyIn, LimitChangeIn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/requests", tags=["requests"])
@@ -86,7 +86,13 @@ def apply(body: ApplyIn, user: CurrentUser = Depends(current_user)):
     store = MappingStore()
     reqs = RequestStore()
 
-    # 账号数量不设上限（不限制每人可申请的 Kiro 账号数）
+    # 每人一个账号：积分池里 credits 全员共享，多开账号只会多占一个席位（$20/月）
+    existing = store.list_by_feishu(user.open_id)
+    if existing:
+        raise HTTPException(400, f"你已有 Kiro 账号（{existing[0].kiro_username}），每人只能有一个账号；"
+                                 "账号被停用的话请联系管理员恢复")
+    if any(r.type == APPLY and r.status in (PENDING, APPROVED) for r in reqs.list_by_user(user.open_id)):
+        raise HTTPException(400, "你已有一条开通申请在处理中，请等审批结果")
 
     # 用户名占用：先查映射表（平台开的账号），再实查 IDC——IDC 里可能有
     # 非平台创建的存量用户（如 SRE 手工建的），只查映射表拦不住，
@@ -132,21 +138,6 @@ def limit_change(body: LimitChangeIn, user: CurrentUser = Depends(current_user))
         kiro_user_id=body.kiro_user_id,
         payload={"username": acct.kiro_username, "requested_limit": body.requested_limit,
                  "current_limit": current, "reason": body.reason},
-    ))
-    mids = _push_approval_cards(req)
-    if mids:
-        reqs.update_fields(req.request_id, notify_message_ids=mids)
-    return {"request_id": req.request_id, "status": req.status}
-
-
-@router.post("/quota-increase")
-def quota_increase(body: QuotaIn, user: CurrentUser = Depends(current_user)):
-    if body.requested_quota <= settings.default_account_quota:
-        raise HTTPException(400, "请求配额需大于当前配额")
-    reqs = RequestStore()
-    req = reqs.create(Request(
-        user_open_id=user.open_id, user_name=user.name, type=QUOTA_INCREASE,
-        payload={"requested_quota": body.requested_quota},
     ))
     mids = _push_approval_cards(req)
     if mids:

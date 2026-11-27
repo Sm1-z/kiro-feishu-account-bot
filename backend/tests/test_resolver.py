@@ -13,7 +13,7 @@ from moto import mock_aws
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.config import settings  # noqa: E402
-from app.mapping_store import MappingStore, PRIMARY, SECONDARY, AccountMapping  # noqa: E402
+from app.mapping_store import MappingStore, PRIMARY, AccountMapping  # noqa: E402
 import app.resolver as R  # noqa: E402
 
 TABLE, GSI, REGION = "kiro-account-mapping", "feishu_open_id-index", settings.aws_region
@@ -71,8 +71,15 @@ def test_record_new_account_first_is_primary(store):
     assert m1.account_role == PRIMARY  # 首个=主
     assert r.store.get("u1").usage_limit == 1000
 
-    m2 = r.record_new_account("u2", "ou_li", "张三", "zhangsan-new1", "l2@x.com", "team-a")
-    assert m2.account_role == SECONDARY  # 第二个=副
+
+
+def test_manual_link_enforces_one_account_per_user(store):
+    r = R.Resolver(store)
+    r.record_new_account("u1", "ou_li", "张三", "zhangsan", "l@x.com", "team-a")
+    with pytest.raises(R.AccountAlreadyLinked):
+        r.manual_link("u2", "ou_li", feishu_name="张三", kiro_username="zhangsan-2")
+    r.manual_link("u1", "ou_li", feishu_name="张三", kiro_username="zhangsan")  # 同一账号重复绑定：幂等
+    assert store.get("u1").account_role == PRIMARY
 
 
 def test_accounts_of_is_db_only(store):

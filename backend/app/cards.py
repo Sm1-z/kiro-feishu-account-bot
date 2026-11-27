@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-TYPE_LABEL = {"apply": "开通账号", "limit_change": "调整用量上限", "quota_increase": "增加配额"}
+TYPE_LABEL = {"apply": "开通账号", "limit_change": "调整用量上限"}
 
 
 def _limit_text(v) -> str:
@@ -31,8 +31,6 @@ def _fields(req_type: str, applicant: str, payload: dict, pool_hint: str = "") -
             f"**当前上限**：{_limit_text(payload.get('current_limit'))}",
             f"**申请上限**：{_limit_text(payload.get('requested_limit'))}",
         ]
-    elif req_type == "quota_increase":
-        rows.append(f"**申请配额**：{payload.get('requested_quota', '')}")
     if payload.get("reason"):
         rows.append(f"**理由**：{payload['reason']}")
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(rows)}}]

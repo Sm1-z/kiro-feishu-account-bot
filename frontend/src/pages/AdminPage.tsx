@@ -20,7 +20,7 @@ const { Header, Content } = Layout
 const { Title } = Typography
 
 const TYPE_LABEL: Record<string, string> = {
-  apply: '开通', limit_change: '调整上限', quota_increase: '配额', limit_set: '设置上限',
+  apply: '开通', limit_change: '调整上限', limit_set: '设置上限',
   deactivate: '停用（移出池）', recycle: '回收', reactivate: '恢复', seat_retry: '重新分配席位',
 }
 const STATUS_COLOR: Record<string, string> = {
@@ -32,7 +32,6 @@ const fmtNum = (v: number | null | undefined) => (v === null || v === undefined 
 const fmtCredits = (v: number | null | undefined) =>
   v === null || v === undefined ? dash : v.toLocaleString(undefined, { maximumFractionDigits: 1 })
 const fmtDate = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '—')
-const roleTag = (r: string) => (r === 'primary' ? <Tag color="gold">主</Tag> : <Tag>副</Tag>)
 
 // 积分池实况优先；实况不可得时按快照
 const effPool = (r: AccountRow) =>
@@ -63,7 +62,6 @@ const reqDetail = (r: ReqItem) => {
     case 'apply': return `${p.username} · ${p.email} · ${p.group || '默认组'} · 上限 ${p.usage_limit ? `${p.usage_limit} credits/月` : '默认'}${p.reason ? ` · 理由：${p.reason}` : ''}`
     case 'limit_change': return `${p.username}：${p.current_limit ?? '默认'} → ${p.requested_limit} credits/月${p.reason ? ` · 理由：${p.reason}` : ''}`
     case 'limit_set': return `${p.scope === 'POOL' ? 'profile 默认上限' : p.username}：${p.from} → ${p.to}`
-    case 'quota_increase': return `配额 → ${p.requested_quota}`
     default: return p.username || JSON.stringify(p)
   }
 }
@@ -205,7 +203,7 @@ function RequestsPanel() {
 const BATCH_LIMIT = 200           // 后端单次上限；超出前端自动分批
 const CONFIRM_TYPE_THRESHOLD = 10 // 名单 ≥ 此数时，确认须手动输入账号数
 
-/** 停用 / 回收弹窗 = 「核对名单 + 确认」。停用即移出积分池，立即生效。 */
+/** 停用 / 回收弹窗 = 「核对名单 + 确认」。停用即移出积分池，立即生效。每人一个账号，停用即此人停用 Kiro。 */
 function DeactivateModal({ open, targets, summary, onClose, onDone }: {
   open: boolean
   targets: AccountRow[]
@@ -218,30 +216,22 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
   const [submitting, setSubmitting] = useState(false)
   const [results, setResults] = useState<BatchResult[] | null>(null)
   const [kw, setKw] = useState('')
-  const [primaryOnly, setPrimaryOnly] = useState(false)
   const [typed, setTyped] = useState('')
 
   useEffect(() => {
-    if (open) {
-      setRows(targets); setRecycle(false); setResults(null)
-      setKw(''); setPrimaryOnly(false); setTyped('')
-    }
+    if (open) { setRows(targets); setRecycle(false); setResults(null); setKw(''); setTyped('') }
   }, [open, targets])
 
   const n = rows.length
-  const primaryRows = rows.filter((r) => r.account_role === 'primary')
   const byTeam = (() => {
     const m = new Map<string, number>()
     for (const r of rows) { const t = r.team || '（无分组）'; m.set(t, (m.get(t) || 0) + 1) }
     return [...m.entries()].sort((a, b) => b[1] - a[1])
   })()
   const monthTotal = rows.reduce((s, r) => s + (r.month_credits ?? 0), 0)
-
   const shown = rows.filter((r) =>
-    (!primaryOnly || r.account_role === 'primary') &&
-    (!kw || `${r.kiro_username} ${r.feishu_name} ${r.team}`.toLowerCase().includes(kw.toLowerCase())))
+    !kw || `${r.kiro_username} ${r.feishu_name} ${r.team}`.toLowerCase().includes(kw.toLowerCase()))
   const remove = (id: string) => setRows((cur) => cur.filter((r) => r.kiro_user_id !== id))
-
   const needType = n >= CONFIRM_TYPE_THRESHOLD
   const typedOk = !needType || typed.trim() === String(n)
 
@@ -269,7 +259,7 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
   const scope = byTeam.length === 1 ? `分组 ${byTeam[0][0]} 的 ` : byTeam.length > 1 ? `${byTeam.length} 个分组共 ` : ''
   const confirmTitle = recycle
     ? `确认回收${scope}${n} 个账号？移出积分池 + 删除 IDC 用户 + 解除映射，不可恢复`
-    : `确认停用${scope}${n} 个账号？立即移出积分池，用户马上失去 Kiro 访问`
+    : `确认停用${scope}${n} 个账号？立即移出积分池，这些人马上失去 Kiro 访问`
 
   const exportResults = () => results && downloadCsv(
     `kiro-${recycle ? 'recycle' : 'deactivate'}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.csv`,
@@ -277,14 +267,12 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
     results.map((r) => [r.username, r.user_id, r.success ? 'success' : 'failed', r.error, recycle ? 'yes' : 'no']))
   const exportList = () => downloadCsv(
     `kiro-deactivate-list-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['username', 'feishu_name', 'role', 'team', 'pool_status', 'limit', 'month_credits'],
-    rows.map((r) => [r.kiro_username, r.feishu_name, r.account_role, r.team, effPool(r), r.limit, r.month_credits]))
+    ['username', 'feishu_name', 'team', 'pool_status', 'limit', 'month_credits'],
+    rows.map((r) => [r.kiro_username, r.feishu_name, r.team, effPool(r), r.limit, r.month_credits]))
 
   const reviewCols = [
-    { title: '用户名', dataIndex: 'kiro_username', sorter: (a: AccountRow, b: AccountRow) => a.kiro_username.localeCompare(b.kiro_username) },
     { title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—' },
-    { title: '主/副', dataIndex: 'account_role', width: 64, render: roleTag,
-      sorter: (a: AccountRow, b: AccountRow) => a.account_role.localeCompare(b.account_role) },
+    { title: '用户名', dataIndex: 'kiro_username', sorter: (a: AccountRow, b: AccountRow) => a.kiro_username.localeCompare(b.kiro_username) },
     { title: '分组', dataIndex: 'team', render: (v: string) => v || '—',
       sorter: (a: AccountRow, b: AccountRow) => (a.team || '').localeCompare(b.team || '') },
     { title: '积分池', key: 'pool', render: (_: any, r: AccountRow) => poolTag(r) },
@@ -331,39 +319,30 @@ function DeactivateModal({ open, targets, summary, onClose, onDone }: {
           {summary && <Alert type="info" showIcon message={summary} />}
           <Card size="small" data-testid="deact-summary">
             <Space wrap size={[16, 6]}>
-              <span>共 <b style={{ fontSize: 16 }}>{n}</b> 个账号</span>
+              <span>共 <b style={{ fontSize: 16 }}>{n}</b> 个账号（{n} 人）</span>
               <span>分组：{byTeam.length ? byTeam.map(([t, c]) => `${t} ${c}`).join(' · ') : '—'}</span>
-              <span style={primaryRows.length ? { color: '#cf1322', fontWeight: 600 } : undefined}>
-                主账号 {primaryRows.length}
-              </span>
               <span>本月已用合计 <b>{fmtCredits(monthTotal)}</b> credits</span>
               <Typography.Link onClick={exportList} style={{ fontSize: 12 }}>导出名单</Typography.Link>
             </Space>
           </Card>
-          {primaryRows.length > 0 && (
-            <Alert type="error" showIcon
-              message={<span>名单里有 <b>{primaryRows.length}</b> 个主账号</span>}
-              description="主账号是用户的永久账号，预设默认不选主账号。请在下方用「仅看主账号」核对，误选的点「移除」。" />
-          )}
           <div>
             <Space style={{ marginBottom: 8 }} wrap>
               <Input.Search allowClear placeholder="按用户名 / 飞书用户 / 分组过滤" style={{ width: 280 }}
                 value={kw} onChange={(e) => setKw(e.target.value)} />
-              <Checkbox checked={primaryOnly} onChange={(e) => setPrimaryOnly(e.target.checked)}>仅看主账号</Checkbox>
-              <span style={{ fontSize: 12, color: '#888' }}>显示 {shown.length} / {n}；要补选请关闭弹窗回明细表勾选</span>
+              <span style={{ fontSize: 12, color: '#888' }}>显示 {shown.length} / {n}；要补选请关闭弹窗回列表勾选</span>
             </Space>
             <Table rowKey="kiro_user_id" dataSource={shown} columns={reviewCols} size="small"
               pagination={{ pageSize: 10, size: 'small', showTotal: (t) => `共 ${t} 行` }}
               locale={{ emptyText: n ? '无匹配' : '名单为空' }} />
           </div>
           <Alert type="warning" showIcon message="停用 = 立即移出积分池"
-            description="用户马上失去 Kiro 访问；已用的 credits 不退，本账期席位费照收，下个账期起不再计费。预付池空出的席位留给其他人用，要少付席位费需在 Kiro 控制台删除空闲席位。若用户还通过某个已加入积分池的组获得访问，需同时把他移出该组。" />
+            description="每人只有一个账号，停用后这个人马上无法使用 Kiro；已用的 credits 不退，本账期席位费照收，下个账期起不再计费。预付池空出的席位留给其他人用，要少付席位费需在 Kiro 控制台删除空闲席位。若用户还通过某个已加入积分池的组获得访问，需同时把他移出该组。" />
           <Checkbox checked={recycle} onChange={(e) => setRecycle(e.target.checked)}>
-            同时删除 IDC 用户并解除飞书映射（回收账号，<b>不可恢复</b>）
+            同时删除 IDC 用户并解除飞书映射（回收账号，<b>不可恢复</b>；此人之后可以重新申请）
           </Checkbox>
           {recycle && (
             <Alert type="error" showIcon message="回收会删除 IAM Identity Center 用户"
-              description="用户的登录身份随即消失，无法再登录 Kiro；个人上限一并清除。通常只对低用量副账号执行。" />
+              description="用户的登录身份随即消失，无法再登录 Kiro；个人上限一并清除。通常用于离职或长期不用的人员。" />
           )}
           {needType && (
             <Alert type="warning" showIcon
@@ -425,38 +404,6 @@ function LimitModal({ target, onClose, onDone }: {
   )
 }
 
-// 一个飞书人聚合后的视图（名下多账号汇总）
-interface PersonRow {
-  feishu_open_id: string
-  feishu_name: string
-  account_count: number
-  credits: number
-  messages: number
-  has_usage: boolean
-  last_active: string
-  accounts: AccountRow[]
-}
-
-function aggregateByPerson(rows: AccountRow[]): PersonRow[] {
-  const map = new Map<string, PersonRow>()
-  for (const r of rows) {
-    const key = r.feishu_open_id || r.kiro_user_id
-    let p = map.get(key)
-    if (!p) {
-      p = { feishu_open_id: r.feishu_open_id, feishu_name: r.feishu_name || '—',
-            account_count: 0, credits: 0, messages: 0, has_usage: false, last_active: '', accounts: [] }
-      map.set(key, p)
-    }
-    p.accounts.push(r)
-    p.account_count += 1
-    if (r.month_credits != null) { p.credits += r.month_credits; p.has_usage = true }
-    if (r.month_messages != null) { p.messages += r.month_messages; p.has_usage = true }
-    const la = r.month_last_active || r.usage_last_active
-    if (la && la > p.last_active) p.last_active = la
-  }
-  return [...map.values()].sort((a, b) => b.credits - a.credits)
-}
-
 function AccountsPanel({ prepaid }: { prepaid: boolean }) {
   const [rows, setRows] = useState<AccountRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -465,11 +412,9 @@ function AccountsPanel({ prepaid }: { prepaid: boolean }) {
   const [deactSummary, setDeactSummary] = useState<string | undefined>(undefined)
   const [historyRow, setHistoryRow] = useState<AccountRow | null>(null)
   const [limitTarget, setLimitTarget] = useState<{ scope: 'USER'; row: AccountRow; current: number | null } | null>(null)
-  const [view, setView] = useState<'person' | 'flat'>('person')
   const [fTeams, setFTeams] = useState<string[]>([])
   const [fPool, setFPool] = useState<string | undefined>(undefined)
   const [fScope, setFScope] = useState<string | undefined>(undefined)
-  const [fRole, setFRole] = useState<string | undefined>(undefined)
   const [fCreditsLt, setFCreditsLt] = useState<number | null>(null)
   const [fInactiveDays, setFInactiveDays] = useState<number | null>(null)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
@@ -502,15 +447,16 @@ function AccountsPanel({ prepaid }: { prepaid: boolean }) {
     } catch (e: any) { message.error(e.response?.data?.detail || '分配失败') }
   }
 
-  const people = aggregateByPerson(rows)
   const inPool = rows.filter(isAccountActive)
   const awaiting = rows.filter((r) => r.live_synced && r.pool_status === 'AWAITING_SEAT')
   const nearLimit = rows.filter((r) => r.limit_used_pct != null && r.limit_used_pct >= 80)
   const totalCredits = rows.reduce((s, r) => s + (r.month_credits ?? 0), 0)
-  const activePeople = people.filter((p) => p.has_usage && p.credits > 0).length
+  const activeUsers = rows.filter((r) => (r.month_credits ?? 0) > 0).length
+  const nameOf = (r: AccountRow) => r.feishu_name || r.kiro_username
 
-  const topByCredits = people.filter((p) => p.credits > 0)
-    .slice(0, 8).map((p) => ({ label: p.feishu_name, value: +p.credits.toFixed(1) }))
+  const topByCredits = [...rows].filter((r) => (r.month_credits ?? 0) > 0)
+    .sort((a, b) => (b.month_credits ?? 0) - (a.month_credits ?? 0))
+    .slice(0, 8).map((r) => ({ label: nameOf(r), value: +(r.month_credits ?? 0).toFixed(1) }))
   const scopeDist = (() => {
     const m = new Map<string, number>()
     for (const r of inPool) {
@@ -526,36 +472,37 @@ function AccountsPanel({ prepaid }: { prepaid: boolean }) {
     (!fTeams.length || fTeams.includes(r.team)) &&
     (!fPool || effPool(r) === fPool) &&
     (!fScope || (r.limit_scope || 'UNKNOWN') === fScope) &&
-    (!fRole || r.account_role === fRole) &&
     (fCreditsLt == null || (r.month_credits ?? 0) < fCreditsLt) &&
     (fInactiveDays == null || daysSince(r.usage_last_active) >= fInactiveDays))
   const filterDesc = [
     fTeams.length ? `分组 ${fTeams.join('/')}` : '',
     fPool ? `积分池 ${fPool}` : '',
     fScope ? `上限来源 ${LIMIT_SCOPE_LABEL[fScope] || fScope}` : '',
-    fRole ? (fRole === 'primary' ? '主账号' : '副账号') : '',
     fCreditsLt != null ? `本月 Credits < ${fCreditsLt}` : '',
     fInactiveDays != null ? `${fInactiveDays} 天未活跃` : '',
   ].filter(Boolean).join(' · ')
-  const resetFilters = () => { setFTeams([]); setFPool(undefined); setFScope(undefined); setFRole(undefined); setFCreditsLt(null); setFInactiveDays(null) }
-  const selectSecondaryOf = (list: AccountRow[]) =>
-    setSelectedKeys(list.filter((r) => r.account_role === 'secondary' && isAccountActive(r)).map((r) => r.kiro_user_id))
+  const resetFilters = () => { setFTeams([]); setFPool(undefined); setFScope(undefined); setFCreditsLt(null); setFInactiveDays(null) }
+  const selectOf = (list: AccountRow[]) => setSelectedKeys(list.filter(isAccountActive).map((r) => r.kiro_user_id))
   const presetLowUsage = () => {
     const th = fCreditsLt ?? 50
-    setFRole('secondary'); setFCreditsLt(th)
-    selectSecondaryOf(rows.filter((r) => (!fTeams.length || fTeams.includes(r.team)) && (r.month_credits ?? 0) < th))
+    const days = fInactiveDays ?? 14
+    setFCreditsLt(th); setFInactiveDays(days)
+    selectOf(rows.filter((r) => (!fTeams.length || fTeams.includes(r.team)) &&
+      (r.month_credits ?? 0) < th && daysSince(r.usage_last_active) >= days))
   }
   const selectedRows = rows.filter((r) => selectedKeys.includes(r.kiro_user_id))
-  const selectedPrimary = selectedRows.filter((r) => r.account_role === 'primary').length
 
-  const subCols = [
+  const cols = [
+    { title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—',
+      sorter: (a: AccountRow, b: AccountRow) => (a.feishu_name || '').localeCompare(b.feishu_name || '') },
     { title: '用户名', dataIndex: 'kiro_username' },
-    { title: '主/副', dataIndex: 'account_role', render: roleTag },
     { title: '分组', dataIndex: 'team' },
     { title: '积分池', key: 'pool', render: (_: any, r: AccountRow) => poolTag(r) },
     { title: '本月上限', key: 'limit', render: (_: any, r: AccountRow) => limitCell(r) },
     { title: <span title="本月已用来自 User Activity Report（日级延迟约 1 天）；80% 橙色、到上限红色">本月已用 / 上限</span>,
-      key: 'used', align: 'right' as const, render: (_: any, r: AccountRow) => usedCell(r) },
+      key: 'used', align: 'right' as const, render: (_: any, r: AccountRow) => usedCell(r),
+      defaultSortOrder: 'descend' as const,
+      sorter: (a: AccountRow, b: AccountRow) => (a.month_credits ?? 0) - (b.month_credits ?? 0) },
     { title: '本月消息', dataIndex: 'month_messages', align: 'right' as const, render: fmtNum },
     { title: '最后活跃', dataIndex: 'usage_last_active', render: (v: string | null) => v || dash },
     { title: '操作', key: 'ops', render: (_: any, r: AccountRow) => (
@@ -578,35 +525,22 @@ function AccountsPanel({ prepaid }: { prepaid: boolean }) {
     ) },
   ]
 
-  const personCols = [
-    { title: '飞书用户', dataIndex: 'feishu_name' },
-    { title: '账号数', dataIndex: 'account_count', align: 'right' as const, render: (n: number) => <Tag>{n}</Tag> },
-    { title: '本月已用（汇总）', dataIndex: 'credits', align: 'right' as const, defaultSortOrder: 'descend' as const,
-      render: (v: number, p: PersonRow) => (p.has_usage ? fmtCredits(v) : dash),
-      sorter: (a: PersonRow, b: PersonRow) => a.credits - b.credits },
-    { title: '本月消息（汇总）', dataIndex: 'messages', align: 'right' as const,
-      render: (v: number, p: PersonRow) => (p.has_usage ? v.toLocaleString() : dash),
-      sorter: (a: PersonRow, b: PersonRow) => a.messages - b.messages },
-    { title: '最后活跃', dataIndex: 'last_active', render: (v: string) => v || dash },
-  ]
-  const flatCols = [{ title: '飞书用户', dataIndex: 'feishu_name', render: (v: string) => v || '—' }, ...subCols]
-
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Row gutter={16}>
-        <Col span={4}><Card size="small"><Statistic title="飞书用户数" value={people.length} /></Card></Col>
-        <Col span={4}><Card size="small"><Statistic title="积分池内账号" value={inPool.length} suffix={`/ ${rows.length}`} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="账号数（每人一个）" value={rows.length} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="积分池内" value={inPool.length} suffix={`/ ${rows.length}`} /></Card></Col>
         <Col span={4}><Card size="small"><Statistic title="等待席位" value={awaiting.length}
           valueStyle={awaiting.length ? { color: '#d46b08' } : undefined} /></Card></Col>
         <Col span={4}><Card size="small"><Statistic title="本月 Credits（全员）" value={totalCredits} precision={1} /></Card></Col>
-        <Col span={4}><Card size="small"><Statistic title="本月有用量的人" value={activePeople} suffix={`/ ${people.length}`} /></Card></Col>
+        <Col span={4}><Card size="small"><Statistic title="本月有用量的人" value={activeUsers} suffix={`/ ${rows.length}`} /></Card></Col>
         <Col span={4}><Card size="small"><Statistic title="用到 80% 上限" value={nearLimit.length}
           valueStyle={nearLimit.length ? { color: '#d46b08' } : undefined} /></Card></Col>
       </Row>
 
       <Row gutter={16}>
         <Col span={14}>
-          <Card size="small" title="Top 用户 · 本月 Credits（按人汇总）"><HBarChart data={topByCredits} /></Card>
+          <Card size="small" title="Top 用户 · 本月 Credits"><HBarChart data={topByCredits} /></Card>
         </Col>
         <Col span={10}>
           <Card size="small" title="上限来源分布（积分池内账号）"><DonutChart data={scopeDist} /></Card>
@@ -618,80 +552,58 @@ function AccountsPanel({ prepaid }: { prepaid: boolean }) {
       <UsageHistoryModal row={historyRow} onClose={() => setHistoryRow(null)} />
       <LimitModal target={limitTarget} onClose={() => setLimitTarget(null)} onDone={() => load(true)} />
 
-      <Card size="small"
-        title={
-          <Space size={12}>
-            <Segmented size="small" value={view} onChange={(v) => setView(v as 'person' | 'flat')}
-              options={[{ label: '按人聚合', value: 'person' }, { label: '账号明细（筛选 / 勾选）', value: 'flat' }]} />
-            <span style={{ fontWeight: 400, fontSize: 12, color: '#888' }}>
-              {view === 'person' ? '展开看名下各账号' : '按分组 / 积分池状态 / 用量筛选，勾选后批量停用'}
-            </span>
-          </Space>
-        }
+      <Card size="small" title="账号列表（每人一个账号）"
         extra={<Button size="small" loading={loading} onClick={() => load(true)}>刷新</Button>}>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -4 }}>
           积分池状态与上限为 AWS 实时数据（在控制台直接移出 / 改上限也会反映）；用量来自 User Activity Report（约每日更新）。
           「停用」= 立即移出积分池；「设上限」即时生效。— 表示暂无数据，点「刷新」强制重查。
         </Typography.Paragraph>
-        {view === 'person' ? (
-          <Table rowKey="feishu_open_id" dataSource={people} columns={personCols} loading={loading} size="small"
-            pagination={{ pageSize: 15 }}
-            expandable={{
-              expandedRowRender: (p: PersonRow) => (
-                <Table rowKey="kiro_user_id" dataSource={p.accounts} columns={subCols} size="small" pagination={false} />
-              ),
-              rowExpandable: (p: PersonRow) => p.accounts.length > 0,
-            }} />
-        ) : (
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
-            <Space wrap size={8} data-testid="flat-filters">
-              <Select mode="multiple" allowClear placeholder="分组" style={{ minWidth: 180 }} value={fTeams}
-                onChange={setFTeams} options={allTeams.map((t) => ({ value: t, label: t }))} maxTagCount="responsive" />
-              <Select allowClear placeholder="积分池状态" style={{ width: 130 }} value={fPool} onChange={setFPool}
-                options={[{ value: 'SEATED', label: '已占座' }, { value: 'AWAITING_SEAT', label: '等待席位' }, { value: 'NONE', label: '不在池中' }]} />
-              <Select allowClear placeholder="上限来源" style={{ width: 130 }} value={fScope} onChange={setFScope}
-                options={[{ value: 'USER', label: '个人上限' }, { value: 'GROUP', label: '组上限' },
-                          { value: 'POOL', label: 'profile 默认' }, { value: 'NONE', label: '无上限' }]} />
-              <Select allowClear placeholder="主/副" style={{ width: 100 }} value={fRole} onChange={setFRole}
-                options={[{ value: 'primary', label: '主账号' }, { value: 'secondary', label: '副账号' }]} />
-              <InputNumber placeholder="不限" style={{ width: 190 }} min={0} value={fCreditsLt}
-                onChange={(v) => setFCreditsLt(v)} addonBefore="本月 Credits <" />
-              <InputNumber placeholder="天" style={{ width: 150 }} min={1} value={fInactiveDays}
-                onChange={(v) => setFInactiveDays(v)} addonBefore="未活跃 ≥" addonAfter="天" />
-              <Button size="small" onClick={resetFilters}>清除筛选</Button>
-              <span style={{ color: '#888', fontSize: 12 }}>匹配 {filtered.length} / {rows.length}</span>
-            </Space>
-            <Space size={8}>
-              <span style={{ fontSize: 12, color: '#888' }}>快速选择：</span>
-              <Button size="small" onClick={presetLowUsage}>低用量副账号（本月 Credits &lt; {fCreditsLt ?? 50}）</Button>
-              <Button size="small" onClick={() => selectSecondaryOf(filtered)}>选中当前匹配的副账号</Button>
-              <span style={{ fontSize: 12, color: '#888' }}>预设只选副账号；主账号需手动勾选。</span>
-            </Space>
-            <Table rowKey="kiro_user_id" dataSource={filtered} columns={flatCols} loading={loading} size="small"
-              pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个账号` }}
-              rowSelection={{
-                selectedRowKeys: selectedKeys,
-                onChange: (keys) => setSelectedKeys(keys as string[]),
-                preserveSelectedRowKeys: true,
-                getCheckboxProps: (r: AccountRow) => ({ disabled: !isAccountActive(r) }),
-              }} />
-            {selectedKeys.length > 0 && (
-              <Alert type={selectedPrimary > 0 ? 'error' : 'warning'} showIcon
-                message={
-                  <Space size={12}>
-                    <span>已选 <b>{selectedKeys.length}</b> 个账号</span>
-                    {selectedPrimary > 0 && <span style={{ color: '#cf1322' }}>其中 <b>{selectedPrimary}</b> 个主账号</span>}
-                    <Button size="small" type="primary" danger
-                      onClick={() => openDeactivate(selectedRows.filter(isAccountActive),
-                        `来自明细视图勾选：${selectedRows.length} 个账号${filterDesc ? `（筛选：${filterDesc}）` : ''}`)}>
-                      批量停用 / 回收
-                    </Button>
-                    <Button size="small" onClick={() => setSelectedKeys([])}>清空选择</Button>
-                  </Space>
-                } />
-            )}
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap size={8} data-testid="flat-filters">
+            <Select mode="multiple" allowClear placeholder="分组" style={{ minWidth: 180 }} value={fTeams}
+              onChange={setFTeams} options={allTeams.map((t) => ({ value: t, label: t }))} maxTagCount="responsive" />
+            <Select allowClear placeholder="积分池状态" style={{ width: 130 }} value={fPool} onChange={setFPool}
+              options={[{ value: 'SEATED', label: '已占座' }, { value: 'AWAITING_SEAT', label: '等待席位' }, { value: 'NONE', label: '不在池中' }]} />
+            <Select allowClear placeholder="上限来源" style={{ width: 130 }} value={fScope} onChange={setFScope}
+              options={[{ value: 'USER', label: '个人上限' }, { value: 'GROUP', label: '组上限' },
+                        { value: 'POOL', label: 'profile 默认' }, { value: 'NONE', label: '无上限' }]} />
+            <InputNumber placeholder="不限" style={{ width: 190 }} min={0} value={fCreditsLt}
+              onChange={(v) => setFCreditsLt(v)} addonBefore="本月 Credits <" />
+            <InputNumber placeholder="天" style={{ width: 150 }} min={1} value={fInactiveDays}
+              onChange={(v) => setFInactiveDays(v)} addonBefore="未活跃 ≥" addonAfter="天" />
+            <Button size="small" onClick={resetFilters}>清除筛选</Button>
+            <span style={{ color: '#888', fontSize: 12 }}>匹配 {filtered.length} / {rows.length}</span>
           </Space>
-        )}
+          <Space size={8}>
+            <span style={{ fontSize: 12, color: '#888' }}>快速选择：</span>
+            <Button size="small" onClick={presetLowUsage}>
+              长期不用的账号（本月 Credits &lt; {fCreditsLt ?? 50} 且 ≥ {fInactiveDays ?? 14} 天未活跃）
+            </Button>
+            <Button size="small" onClick={() => selectOf(filtered)}>选中当前匹配的账号</Button>
+          </Space>
+          <Table rowKey="kiro_user_id" dataSource={filtered} columns={cols} loading={loading} size="small"
+            pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 个账号` }}
+            rowSelection={{
+              selectedRowKeys: selectedKeys,
+              onChange: (keys) => setSelectedKeys(keys as string[]),
+              preserveSelectedRowKeys: true,
+              getCheckboxProps: (r: AccountRow) => ({ disabled: !isAccountActive(r) }),
+            }} />
+          {selectedKeys.length > 0 && (
+            <Alert type="warning" showIcon
+              message={
+                <Space size={12}>
+                  <span>已选 <b>{selectedKeys.length}</b> 个账号（{selectedKeys.length} 人）</span>
+                  <Button size="small" type="primary" danger
+                    onClick={() => openDeactivate(selectedRows.filter(isAccountActive),
+                      `来自列表勾选：${selectedRows.length} 个账号${filterDesc ? `（筛选：${filterDesc}）` : ''}`)}>
+                    批量停用 / 回收
+                  </Button>
+                  <Button size="small" onClick={() => setSelectedKeys([])}>清空选择</Button>
+                </Space>
+              } />
+          )}
+        </Space>
       </Card>
     </Space>
   )
@@ -915,7 +827,8 @@ function ImportPanel() {
       <Select style={{ width: 180 }} placeholder="选择飞书用户" showSearch optionFilterProp="label"
         value={picks[r.kiro_user_id] || r.suggested_open_id || undefined}
         onChange={(v) => setPicks((p) => ({ ...p, [r.kiro_user_id]: v }))}
-        options={users.map((u) => ({ value: u.open_id, label: u.name }))} />
+        options={users.map((u) => ({ value: u.open_id, label: u.has_account ? `${u.name}（已有账号）` : u.name,
+                                     disabled: !!u.has_account }))} />
     ) },
     { title: '操作', render: (_: any, r: UnlinkedAccount) => {
       const target = picks[r.kiro_user_id] || r.suggested_open_id
@@ -935,7 +848,7 @@ function ImportPanel() {
         游离账号 = IDC 里存在但未绑定飞书用户的账号（非本平台开通的存量）。
         绑定后账号会出现在对方的「我的 Kiro 账号」，积分池状态 / 上限 / 用量自动按实况显示。
         建议归属：<Tag color="green">邮箱匹配</Tag>可信度高；<Tag color="orange">拼音匹配</Tag>请人工核对后再绑定。
-        绑定目标下拉仅含在平台登录 / 申请过的飞书用户。
+        每人只能绑定一个账号，已有账号的飞书用户不可选；绑定目标下拉仅含在平台登录 / 申请过的飞书用户。
       </Typography.Paragraph>
       {!loaded && !loading && <Alert type="info" showIcon message="点右上角「扫描游离账号」开始（全量扫 IDC，数秒）" />}
       {loaded && (

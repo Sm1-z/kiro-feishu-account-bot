@@ -29,12 +29,23 @@ from app.aws import get_identity_store_id, get_session
 from app.config import settings
 from app.mapping_store import (
     PRIMARY,
-    SECONDARY,
     AccountMapping,
     MappingStore,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AccountAlreadyLinked(ValueError):
+    """积分池版每个飞书用户只能有一个 Kiro 账号。"""
+
+
+def ensure_no_account(store: MappingStore, feishu_open_id: str, kiro_user_id: str = "") -> None:
+    """该飞书用户已绑定其它 Kiro 账号时抛 AccountAlreadyLinked（同一账号重复绑定视为幂等）。"""
+    existing = [m for m in store.list_by_feishu(feishu_open_id) if m.kiro_user_id != kiro_user_id]
+    if existing:
+        name = existing[0].kiro_username or existing[0].kiro_user_id
+        raise AccountAlreadyLinked(f"该飞书用户已有 Kiro 账号（{name}），每人只能有一个账号")
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +115,8 @@ class Resolver:
         kiro_username: str, kiro_email: str, team: str,
         usage_limit: int | None = None, approved_by: str = "",
     ) -> AccountMapping:
-        """新建账号开通成功后写映射。自动判定主/副：首个账号为主，其余为副。"""
-        role = SECONDARY if self.store.has_primary(feishu_open_id) else PRIMARY
+        """新建账号开通成功后写映射（一人一个账号，统一记为主账号）。"""
+        role = PRIMARY
         mapping = AccountMapping(
             kiro_user_id=kiro_user_id,
             feishu_open_id=feishu_open_id,
@@ -127,11 +138,11 @@ class Resolver:
         self, kiro_user_id: str, feishu_open_id: str, feishu_name: str = "",
         **extra,
     ) -> AccountMapping:
-        """④ 管理员手工关联：直接建立 (open_id ↔ user_id) 映射。"""
-        role = SECONDARY if self.store.has_primary(feishu_open_id) else PRIMARY
+        """④ 管理员手工关联：直接建立 (open_id ↔ user_id) 映射。该飞书用户已有其它账号时拒绝。"""
+        ensure_no_account(self.store, feishu_open_id, kiro_user_id)
         mapping = AccountMapping(
             kiro_user_id=kiro_user_id, feishu_open_id=feishu_open_id,
-            feishu_name=feishu_name, account_role=role, **extra,
+            feishu_name=feishu_name, account_role=PRIMARY, **extra,
         )
         self.store.put(mapping)
         return mapping
@@ -305,9 +316,10 @@ class MigrationResolver:
         return None
 
     def _write_from_idc(self, user_id: str, feishu_open_id: str, feishu_name: str) -> AccountMapping:
-        """读 IDC 用户详情，写入映射。主/副由是否已有主账号决定。"""
+        """读 IDC 用户详情，写入映射（一人一个账号）。"""
+        ensure_no_account(self.store, feishu_open_id, user_id)
         u = self._describe(user_id) or {}
-        role = SECONDARY if self.store.has_primary(feishu_open_id) else PRIMARY
+        role = PRIMARY
         mapping = AccountMapping(
             kiro_user_id=user_id,
             feishu_open_id=feishu_open_id,

@@ -94,7 +94,6 @@ def me(user: CurrentUser = Depends(current_user)):
         "open_id": user.open_id,
         "name": user.name,
         "is_admin": user.is_admin,
-        "quota": settings.default_account_quota,
         "accounts": out,
         "suggested_username": suggest_new_username(user.name, taken),
     }

@@ -1,98 +1,112 @@
-# 真机部署与飞书联调清单 / Local & Feishu Bring-up Checklist
+# 部署与联调清单（积分池版）/ Deploy & Bring-up Checklist (Credit Pool)
 
-> 从零到端到端跑通的部署与联调清单。按顺序执行，每步带验证点。
-> Step-by-step checklist to bring the stack up end-to-end, with a verify point per step.
->
-> 端到端验证覆盖五个落点：IDC 用户 / 加组 / Kiro 订阅 / DynamoDB 映射 / 密码邮件。
-> 下方「踩坑速查」汇总了部署联调中常见的卡点与解法。
+> 从零到端到端跑通的部署与联调清单，按顺序执行，每步带验证点。
+> 端到端验证覆盖：飞书登录 / 卡片审批 / IDC 用户与加组 / 加入积分池与占座 / 用量上限 / 停用与回收 / 积分池总览 / 用量报表。
+> 本清单在 2026-11 用一个后付（POSTPAID）账号完整走通过。
 
-## ⚠️ 踩坑速查（首次联调实录，复用必看）
+## ⚠️ 踩坑速查（复用必看）
 
 | 现象 | 根因 | 解法 |
 |------|------|------|
-| OAuth 报 **20029 重定向 URL 有误** | 飞书后台没加重定向 URL | 安全设置→重定向 URL 加 `http://localhost:8000/api/auth/feishu/callback`（一字不差，http、无尾斜杠） |
-| callback 跳转后 **404 Not Found** | BrowserRouter 客户端路由（/auth/callback、/admin）走 StaticFiles 找不到文件 | 已修：main.py SPA fallback（commit e83f234） |
-| 申请提交报 **99992351 id not exist** | `ADMIN_OPEN_IDS` 还是占位符 | 登录后从 /api/auth/me 取真实 ou_ open_id 回填 .env 重启 |
-| 点卡片按钮 **无权操作 / code 200873**，后端零回调 | 事件/回调订阅方式指向废弃的开发者服务器 API Gateway | 「事件配置」**和**「回调配置」**两个都**切「使用长连接接收回调」 |
-| 长连接收到事件但 **卡片回调仍 processor not found** | 订阅的是旧版 `card.action.trigger_v1`，与 SDK `register_p2_card_action_trigger`（新版）结构不匹配 | 回调里删旧版、添加新版 `card.action.trigger`，重新发版 |
-| 卡片回调到达但 **do_without_validation 报错** | lark-oapi 1.4.15 该方法名无前导下划线 | 已修：feishu_ws.py（commit e83f234） |
-| `uvicorn[standard]` 装不上（watchfiles not found） | 平台/源问题 | 装基础版 `uvicorn==0.34.0` 即可，联调不需要热重载 |
+| 表 / 资源建到了别的 Region | shell 里的 `AWS_REGION` 环境变量**优先于** `.env` | 启动脚本里显式 `export AWS_REGION=<Kiro profile 所在 Region>` |
+| 飞书卡片点「通过」提示「目标服务器超时未响应」 | 飞书回调要在约 3 秒内响应 | 已修：回调立即回 toast，开通在后台执行；本地用 credential_process 类凭证（如 SSO 工具）时每建一个 AWS 会话都要几秒，启动时先取一次临时凭证放进进程环境 |
+| 飞书后台保存「长连接」模式时报未连接 | 飞书要求长连接客户端已在线才能保存 | 先把后端起起来（日志出现 `connected to wss://`），再去保存订阅方式 |
+| 卡片回调到了但报 processor not found | 订阅的是旧版 `card.action.trigger_v1` | 回调订阅只加新版 `card.action.trigger` |
+| 开通失败「预付积分池还没有购买席位」 | 预付账号首次买席位前，加入积分池会被拒 | 先在 Kiro 控制台 Credit sharing →「Add seat」买席位 |
+| 开通后显示「等待席位」 | 预付池没有空余席位 | 控制台买席位后，到「账号总览」点「分配席位」 |
+| 开通失败「已达到 profile 可接入用户数上限」 | Service Quotas `L-295A3FFB` | 在 Service Quotas 控制台（us-east-1）申请提额 |
+| 设上限报「超过了积分池当前的 credits 总量」 | 上限不能超过池子当前总量（月度 + 追加） | 降低上限，或先加席位 / 买追加 credits |
+| 启动后所有接口 503「未配置 JWT_SECRET」 | `JWT_SECRET` 为空或少于 32 字符（安全基线，fail closed） | 配一个随机长字符串 |
+| OAuth 报 **20029 重定向 URL 有误** | 飞书后台没加重定向 URL | 安全设置 → 重定向 URL 加 `{域名}/api/auth/feishu/callback`（本地 `http://localhost:8000/api/auth/feishu/callback`） |
+| 登录回调 400「登录状态校验失败」 | 回调里的 state 与浏览器 cookie 不一致（防登录 CSRF） | 从登录页重新点「飞书登录」；不要直接复用旧的回调链接 |
+| 申请提交报 **99992351 id not exist** | `ADMIN_OPEN_IDS` 还是占位符 | 登录后从 `/api/auth/me` 取真实 `ou_` open_id 回填 `.env` 重启（open_id 按应用区分，换应用要重取） |
+| 用量列一直是 — | 用量报表未配置，或当天还没有报表 | 见 1.4；报表每天 02:00 UTC 写入，只包含前一天用过 Kiro 的人 |
 
 ---
 
 ## 阶段 0 — 前置准备
 
-- [ ] 一个启用了 IAM Identity Center 的 AWS 账号，记录 `Identity Store ID`、`SSO Instance ARN`、`KIRO_SIGN_IN_URL`
-- [ ] 一个具备运行环境的载体（EC2 / ECS / EKS，或本地 Docker 做联调）
-- [ ] 飞书企业自建应用（下面阶段 2 创建）
+- [ ] 一个启用了 IAM Identity Center 的 AWS 账号，记录 `Identity Store ID`、`SSO Instance ARN`、访问门户 URL（`KIRO_SIGN_IN_URL`）
+- [ ] 该账号的 Kiro profile 已开启积分池（2026-11 之后新建的 profile 默认就是）
+- [ ] 确认计费方式：后付（加人即占座）还是预付（须先买席位）。部署后「积分池」页顶部会显示；预付账号先在控制台买第一批席位
+- [ ] 一个可绑 IAM Role 的运行载体（EC2 / ECS / EKS；本地联调用 `aws sso login` 或 profile）
+- [ ] 飞书企业自建应用（阶段 2 创建）
 
 ---
 
 ## 阶段 1 — AWS 资源
 
-### 1.1 建 DynamoDB 表
+### 1.1 DynamoDB 表
 ```bash
-python infra/create_table.py        # 凭证走 aws sso / Role
+export AWS_REGION=us-east-1          # 改成 Kiro profile 所在 Region
+python infra/create_table.py         # 建 kiro-account-mapping 与 kiro-account-mapping-requests（按量计费）
 ```
-- [ ] 验证：控制台能看到 `kiro-account-mapping`（含 GSI `feishu_open_id-index`）
-- [ ] 手动建第二张表 `kiro-account-mapping-requests`（PK=request_id）。可仿照 create_table.py 加一段，或控制台建
+- [ ] 验证：两张表都在目标 Region，状态 ACTIVE
 
-### 1.2 IAM Role + 权限
-- [ ] 给运行载体绑定 IAM Role（EC2 Instance Profile / ECS Task Role / EKS IRSA）
-- [ ] 附加 `infra/iam-policy.json`
-- [ ] 验证：在载体上 `aws sts get-caller-identity` 返回的是 Role，不是长期 AK/SK
-- [ ] 验证：`aws identitystore list-groups --identity-store-id <ID>` 能列出组（含申请表单要用到的目标组）
+### 1.2 IAM Role
+- [ ] 给运行载体绑定 IAM Role，附加 `infra/iam-policy.json`
+- [ ] 验证：载体上 `aws sts get-caller-identity` 返回的是 Role，不是长期 AK/SK
 
-> ⚠️ 安全基线：全程**不要**在 `.env` 里填 `AWS_ACCESS_KEY_ID/SECRET`。
->
-> ⚠️ **开通链路权限**：订阅步 `q:CreateAssignment` 由 q 服务代理级联调用 sso/sso-directory/identitystore/user-subscriptions，逐个补 action 抠不全，`infra/iam-policy.json` 已按 namespace 放宽这组权限。
-> **Provisioning perms**: the `q:CreateAssignment` step is proxied by the q service and cascades into sso/sso-directory/identitystore/user-subscriptions; a tight least-privilege set is un-enumerable, so `infra/iam-policy.json` broadens these by namespace.
+> ⚠️ 积分池接口（`q:CreateAssignment` / `q:AssignSeats` / `q:SetUsageLimit` 等）会由 Kiro 控制面用调用者的身份继续调用 user-subscriptions / IAM Identity Center，
+> 逐个补 action 很难补全，策略里按 namespace 放宽了这组权限。
 
-### 1.3 Overages 超额上限（可选）
+### 1.3 积分池配置项（可选，留空自动解析）
+- `KIRO_ACCOUNT_ID`：留空用 STS 解析
+- `KIRO_POOL_ARN`：留空用 ListProfiles 的 `creditPools[0].arn` 自动发现
+- `KIRO_CONSOLE_URL`：Kiro 控制台 Credit sharing 页面地址，填了「积分池」页会给跳转链接
 
-管理页「账号总览」会展示 Kiro Overages 超额上限（Service Quotas: `kiro` / `L-75434B0B`，
-"Maximum allowed overage per Kiro profile"，USD/订阅）与最坏月超额敞口测算，
-并支持应用内直接发起调高（增量校验 + 二次确认 + 落 requests 表审计）。
+### 1.4 用量报表（可选，账号总览的「本月已用」依赖它）
 
-- [ ] 权限：`infra/iam-policy.json` 的 Sid `KiroOverageQuotaManage`（Get/GetDefault/RequestIncrease/ListChangeHistory 四个 action）。缺权限不报错，卡片降级显示 —
-- [ ] 该 quota 在 **us-east-1**；Overages 默认关闭，需在 Kiro console → Settings 手动开启后 cap 才实际生效
-
-> ⚠️ **上限只可调高，不可调低**（实测 `RequestServiceQuotaIncrease` 对小于当前值的请求直接拒绝
-> `IllegalArgumentException`）。调低需开 AWS Support case。应用内调高有两道护栏：
-> 单次最多调至当前值 2 倍 + 已有审批中请求时禁止重复提交；每次调高记入 requests 表（谁/何时/从多少到多少）。
-> **Overage cap is increase-only**: requests below the current value are rejected by the API;
-> lowering it requires an AWS Support case. In-app raises are capped at 2x per request and audited.
+1. 建报表桶（与 Kiro profile 同账号、同 Region），四项 Block Public Access 全开、默认加密：
+   ```bash
+   B=kiro-user-activity-<ACCOUNT_ID>
+   aws s3api create-bucket --bucket $B
+   aws s3api put-public-access-block --bucket $B --public-access-block-configuration \
+     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+   aws s3api put-bucket-encryption --bucket $B --server-side-encryption-configuration \
+     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+   # 桶策略：infra/user-activity-report/bucket-policy.json 里替换 ACCOUNT_ID / REGION
+   aws s3api put-bucket-policy --bucket $B --policy file://bucket-policy.json
+   ```
+2. 建 Athena 查询结果桶 `kiro-user-report-dashboard-athena-results-<ACCOUNT_ID>`（同样私有加密，建议 7 天过期）
+3. 建库建表：Athena 执行 `CREATE DATABASE IF NOT EXISTS kiro_user_report`，再执行
+   `infra/user-activity-report/create_table.sql`（替换 ACCOUNT_ID / REGION；分区投影，不需要 Glue crawler）
+4. Kiro 控制台 → **Controls** → 选策略 → **Edit** → **Rules and settings** → **Privacy and telemetry** →
+   **Kiro user activity reports** → **CSV report** → **Turn on**，**CSV destination** 填 `s3://kiro-user-activity-<ACCOUNT_ID>/reports/`
+   → **Save to draft** → **Publish**（profile 还没迁到 Controls 的，在 **Settings → Kiro user activity reports** 里开）
+5. `.env` 填 `ATHENA_DATABASE=kiro_user_report`、`ATHENA_OUTPUT_BUCKET=s3://kiro-user-report-dashboard-athena-results-<ACCOUNT_ID>/`、`GLUE_TABLE_NAME=user_report`
+- [ ] 验证：次日 02:00 UTC 之后 `s3://kiro-user-activity-<ACCOUNT_ID>/reports/AWSLogs/<ACCOUNT_ID>/KiroLogs/user_report/` 下出现 CSV
+  （只包含前一天用过 Kiro 的人）
 
 ---
 
 ## 阶段 2 — 飞书应用
 
 ### 2.1 创建应用
-- [ ] [飞书开放平台](https://open.feishu.cn/) → 创建企业自建应用
-- [ ] 记录 `App ID` / `App Secret`
+- [ ] [飞书开放平台](https://open.feishu.cn/) → 创建企业自建应用 → 记录 `App ID` / `App Secret`
 
 ### 2.2 添加能力
-- [ ] 添加「网页应用」能力（用于 OAuth 登录）
-- [ ] 添加「机器人」能力（用于发/更新审批卡片）
+- [ ] 「机器人」能力（发 / 更新审批卡片）
+- [ ] 「网页应用」能力：桌面端主页填平台地址（本地 `http://localhost:8000/`），建议选「在浏览器新标签页打开」
 
-### 2.3 配置 OAuth
-- [ ] 安全设置 → 重定向 URL 填：`{部署域名}/api/auth/feishu/callback`
-  - 本地联调可用 `http://localhost:8000/api/auth/feishu/callback`
+### 2.3 安全设置
+- [ ] 重定向 URL：`{平台地址}/api/auth/feishu/callback`
 
-### 2.4 申请权限
-- [ ] `contact:user.base:readonly`（OAuth 获取用户基本信息）
-- [ ] `im:message:send`（发审批卡片）
-- [ ] `im:message`（更新卡片状态）
+### 2.4 权限（「批量导入 / 导出权限」粘贴即可）
+```json
+{"scopes":{"tenant":["im:message","im:message:send_as_bot"],"user":["contact:user.base:readonly"]}}
+```
 
-### 2.5 事件订阅（长连接模式 —— v2 的关键，免公网）
-- [ ] 事件与回调 → 订阅方式选 **使用长连接接收回调**
-- [ ] 添加事件 `card.action.trigger`（卡片交互回调）
+### 2.5 事件与回调（长连接，免公网）
+- [ ] **先启动后端**（阶段 3），确认日志出现 `connected to wss://`
+- [ ] 事件配置 → 订阅方式选「使用长连接接收事件」→ 验证显示 Connected → 保存
+- [ ] 回调配置 → 订阅方式选「使用长连接接收回调」→ 保存 → 添加回调：**只加新版 `card.action.trigger`**
 
 ### 2.6 发布
-- [ ] 版本管理与发布 → 创建版本 → 提交 → 管理后台审核通过
-- [ ] 验证：应用状态为「已发布/已启用」
+- [ ] 版本管理与发布 → 创建版本 → 发布（可用范围仅限少数成员时免审；否则需企业管理员审核）
+- [ ] 建议：机器人设置里关闭「Allow group invites from other bots」（平台用不到群聊）
 
-> ⚠️ 每次改权限/能力后都要**重新创建版本并发布**才生效。
+> ⚠️ 改权限 / 能力后要重新创建版本并发布才生效。
 
 ---
 
@@ -102,57 +116,57 @@ python infra/create_table.py        # 凭证走 aws sso / Role
 ```bash
 cd backend && cp .env.example .env
 ```
-填入（**无 AK/SK**）：
-- [ ] `IDENTITY_STORE_ID` / `SSO_INSTANCE_ARN` / `KIRO_SIGN_IN_URL`
-- [ ] `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
-- [ ] `FEISHU_REDIRECT_URI`（与 2.3 一致）
-- [ ] `ADMIN_OPEN_IDS`（你自己的飞书 open_id，先填自己便于联调）
-- [ ] `JWT_SECRET`（随机 32+ 字符串）
-- [ ] `FRONTEND_URL`（本地 `http://localhost:8000`，前端已 build 进 static 时同源）
-
-> 取自己的 open_id：先随便配一个，登录后看 `/api/auth/me` 返回的 `open_id`，再回填 `ADMIN_OPEN_IDS` 重启。
+- [ ] `AWS_REGION`（Kiro profile 所在 Region）/ `IDENTITY_STORE_ID` / `SSO_INSTANCE_ARN` / `KIRO_SIGN_IN_URL` / `KIRO_GROUP_NAME`（默认组）
+- [ ] `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_REDIRECT_URI`（与 2.3 一致）
+- [ ] `ADMIN_OPEN_IDS`（先填自己，登录后从 `/api/auth/me` 取）
+- [ ] `JWT_SECRET`（随机 32+ 字符）/ `FRONTEND_URL`（前端 build 进 static 时与平台地址同源）
+- [ ] 用量报表三项（见 1.4，可后补）
+- [ ] **不要**在 `.env` 里填 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
 
 ### 3.2 构建前端 + 启动
 ```bash
-cd frontend && npm install && npm run build   # 产物进 backend/static
+cd frontend && npm ci && npm run build          # 产物进 backend/static
 cd ../backend && pip install -r requirements.txt
 uvicorn app.main:app --host 127.0.0.1 --port 8000   # 只监听本机
 ```
 > 对外访问：在同一台机器上用 HTTPS 反向代理（nginx / Caddy）或前置 ALB 把 443 转到 127.0.0.1:8000，
 > 安全组只放行公司出口 IP / VPN 网段到 443；不要把 8000 端口直接对 0.0.0.0/0 开放，也不要用 `--host 0.0.0.0`。
-- [ ] 验证：日志出现「飞书 WebSocket 长连接客户端已启动」
-- [ ] 验证：`curl localhost:8000/api/health` → `{"status":"ok"}`
-- [ ] 验证：浏览器开 `http://localhost:8000/` 看到登录页
+
+- [ ] 验证：日志出现 `connected to wss://msg-frontier.feishu.cn`
+- [ ] 验证：`curl 127.0.0.1:8000/api/health` → `{"status":"ok"}`
+- [ ] 验证：浏览器打开平台地址看到登录页
 
 ---
 
 ## 阶段 4 — 端到端联调（核心验证）
 
 ### 4.1 登录
-- [ ] 点「飞书登录」→ 跳飞书授权 → 回调 → 进 Dashboard
-- [ ] 验证：右上角显示你的飞书姓名
+- [ ] 点「飞书登录」→ 飞书授权 → 回到「我的 Kiro 账号」
 - [ ] 验证：`/api/auth/me` 的 `is_admin=true`（已回填自己 open_id）
 
-### 4.2 申请（普通用户视角）
-- [ ] 点「申请账号」→ 表单（用户名已自动推荐）→ 选分组/套餐（pro / pro+ / **pro max ($100)** / power）→ 提交
-- [ ] 验证：飞书收到一张**审批卡片**（你既是申请人又是管理员，能收到）
-- [ ] 验证：「我的申请记录」出现一条 `pending`
+### 4.2 积分池总览
+- [ ] 管理后台 →「积分池」：计费方式、剩余 credits、席位、配额与控制台一致；没有报错提示条
 
-### 4.3 审批（飞书端 —— v2 重点）
-- [ ] 在飞书卡片上点「✅ 通过」
-- [ ] 验证：卡片秒变「⏳ 处理中」（先 ACK）
-- [ ] 验证：几秒后卡片变「✅ 已通过」，且收到结果通知卡片
-- [ ] 验证：IDC 控制台出现新用户、加了组、有 Kiro 订阅
-- [ ] 验证：DynamoDB `kiro-account-mapping` 出现映射（PK=新 UserId，account_role=primary）
-- [ ] 验证：邮箱收到密码设置邮件
+### 4.3 申请 → 飞书审批 → 自动开通
+- [ ] 管理后台 →「分组管理」新建一个测试组
+- [ ] 员工端「申请账号」：填测试用户名 / 邮箱、选组、每月上限填 100 → 提交；飞书收到审批卡片（卡片底部有积分池现状）
+- [ ] 飞书卡片点「✅ 通过」：**马上**弹出「已受理，正在处理…」；几秒后卡片变「✅ 已通过」，并收到结果通知
+- [ ] 验证：IDC 出现新用户并在组里；「账号总览」里该账号「已占座」、本月上限 100（个人上限）；测试邮箱收到密码设置邮件
+- [ ] 验证：再点「申请账号」按钮是灰的（每人一个账号）
 
-### 4.4 审批（Web 端 —— 同源验证）
-- [ ] 再申请一个副账号 → 进「审批后台」→ 点「通过」
-- [ ] 验证：执行成功，且该账号 `account_role=secondary`（一人第二个号自动判副）
+### 4.4 用量上限
+- [ ] 员工端「申请调整上限」→ 飞书通过 → 生效上限变为新值
+- [ ] 管理端：profile 默认上限设 150，个人上限设 120 → 生效 120；删除个人上限 → 回落到 150；删除 profile 默认上限 → 无上限
 
-### 4.5 防重验证
-- [ ] 申请一条 → 飞书点通过的同时，Web 后台也点通过
-- [ ] 验证：只执行一次，第二次提示「已处理」（不重复开通）
+### 4.5 停用 / 恢复 / 回收
+- [ ] 「停用」→ 该账号变「不在池中」；「恢复」→ 回到「已占座」
+- [ ] 勾选「同时删除 IDC 用户并解除飞书映射」再停用 → IDC 用户消失、账号从列表移除
+- [ ] 「申请审批 → 全部」能看到每一步的审计记录
+
+### 4.6 防重
+- [ ] 同一条申请：飞书点通过的同时 Web 后台也点通过 → 只执行一次，另一端提示已处理
+
+> 测试成本：后付池每个测试用户占座即计费，按天折算（月底几天约 $2–3 / 人）；移出不退当月费用，测完及时回收，避免下个账期整月计费。
 
 ---
 
@@ -160,17 +174,9 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000   # 只监听本机
 
 | 现象 | 排查 |
 |------|------|
-| 卡片点了没反应 | 看日志 `app.feishu_ws`；确认 `card.action.trigger` 已订阅、应用已发布、长连接已启动 |
-| OAuth 回调 400 | `FEISHU_REDIRECT_URI` 与飞书后台配置不一致 |
-| 开通失败「组不存在」 | `group` 选的组在 IDC 没有，先建组或改选 |
-| 开通失败「无法解析凭证」 | 载体没绑 IAM Role，或本地没 `aws sso login` |
+| 卡片点了没反应 | 看日志 `app.feishu_ws`；确认回调订阅了新版 `card.action.trigger`、应用已发布、长连接在线 |
+| 「积分池」页报「无法读取积分池」 | Kiro profile 没开积分池，或运行角色缺 `q:*` / `user-subscriptions:*` 读权限 |
+| 开通失败「组不存在」 | 申请里选的组在 IDC 没有，先在「分组管理」建组 |
+| 开通失败「无法解析凭证」 | 载体没绑 IAM Role，或本地凭证过期 |
 | 邮箱已占用 | 该 email 已被某账号用（IDC 邮箱唯一），换邮箱 |
-| me 里 is_admin=false | `ADMIN_OPEN_IDS` 没填你的 open_id，回填后重启 |
-
----
-
-## 联调通过后的下一步
-
-- M3：跑存量迁移脚本（`MigrationResolver`）把历史账号入库
-- M4：副账号回收清单 + 对接 Kiro Analytics Dashboard
-- 生产化：requests 表加 `user_open_id-index` GSI、state 防 CSRF 收紧、前端 chunk 拆分
+| 实况显示「（快照）」 | 拉取积分池实况失败（网络 / 权限），界面回退到映射表快照 |

@@ -6,10 +6,10 @@
         <mxCell id="1" parent="0" />
 
         <!-- Title -->
-        <mxCell id="title" value="Kiro 账号自助管理平台 — AWS 架构图 / Kiro Self-Service Account Platform" style="text;html=1;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;fillColor=none;" vertex="1" parent="1">
+        <mxCell id="title" value="Kiro 账号自助管理平台（积分池版）— AWS 架构图 / Kiro Self-Service Account Platform (Credit Pool)" style="text;html=1;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;fillColor=none;" vertex="1" parent="1">
           <mxGeometry x="40" y="20" width="1000" height="36" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" value="飞书 OAuth 登录 + Web 自助申请 + 飞书卡片审批（免公网 WS 长连接）→ 自动开通 → DynamoDB 映射（UserId 锚点）" style="text;html=1;fontSize=12;align=center;verticalAlign=middle;fillColor=none;fontColor=#5A6C7D;" vertex="1" parent="1">
+        <mxCell id="subtitle" value="飞书 OAuth 登录 + Web 自助申请 + 飞书卡片审批（免公网 WS 长连接）→ 自动开通并加入积分池 → DynamoDB 映射（UserId 锚点，每人一个账号）" style="text;html=1;fontSize=12;align=center;verticalAlign=middle;fillColor=none;fontColor=#5A6C7D;" vertex="1" parent="1">
           <mxGeometry x="40" y="54" width="1000" height="22" as="geometry" />
         </mxCell>
 
@@ -56,16 +56,16 @@
         <mxCell id="b_ws" value="feishu_ws — WS 长连接&#10;先 ACK 后异步 / ACK then async" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="645" y="405" width="210" height="44" as="geometry" />
         </mxCell>
-        <mxCell id="b_router" value="routers&#10;request / admin (14 API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="b_router" value="routers&#10;auth / request / admin" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="425" y="465" width="200" height="44" as="geometry" />
         </mxCell>
         <mxCell id="b_approval" value="approval — 审批引擎&#10;抢占防重 + 异步执行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="645" y="465" width="210" height="44" as="geometry" />
         </mxCell>
-        <mxCell id="b_prov" value="provisioner — 开通/升级/退订/查询 / provision·upgrade·cancel·query&#10;（幂等 + 429 退避 / idempotent + backoff）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="b_prov" value="provisioner + pool — 开通/调上限/停用/恢复/回收 + 席位/余额 / provision·limit·seat·balance&#10;（幂等 + 429 退避 / idempotent + backoff）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="425" y="525" width="430" height="56" as="geometry" />
         </mxCell>
-        <mxCell id="b_mapping" value="mapping_store — DynamoDB 映射层&#10;PK=kiro_user_id, GSI=feishu_open_id（1:N 主/副）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="b_mapping" value="mapping_store — DynamoDB 映射层&#10;PK=kiro_user_id, GSI=feishu_open_id（每人一个账号）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="425" y="595" width="430" height="44" as="geometry" />
         </mxCell>
         <mxCell id="b_usage" value="usage — Athena 用量查询（5min TTL 缓存）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
@@ -85,7 +85,7 @@
         <mxCell id="idc_lbl" value="IAM Identity Center&#10;(IDC)&#10;建用户/加组 / create·group" style="text;html=1;fontSize=10;align=left;verticalAlign=middle;fillColor=none;" vertex="1" parent="1">
           <mxGeometry x="1066" y="190" width="110" height="66" as="geometry" />
         </mxCell>
-        <mxCell id="kiro" value="Amazon Q / Kiro 订阅 / Subscription&#10;q:CreateAssignment（由 q 服务代理 / proxied by q）&#10;级联 sso·sso-directory·user-subscriptions（见 §5 IAM 坑）&#10;tier: KIRO_ENTERPRISE_PRO / _PRO_PLUS / _PRO_MAX / _POWER" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=left;verticalAlign=middle;spacingLeft=78;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="kiro" value="Kiro 积分池 / Credit pool&#10;management.{region}.kiro.dev（SigV4 q）&#10;CreateAssignment(CREDIT_POOL) · AssignSeats · SetUsageLimit&#10;只读 / read：ListSeatAssignments · ListEntitlements" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;align=left;verticalAlign=middle;spacingLeft=78;fontSize=11;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="1180" y="190" width="500" height="110" as="geometry" />
         </mxCell>
         <mxCell id="kiro_ic" value="" style="sketch=0;html=1;dashed=0;whiteSpace=wrap;fillColor=#CC2264;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;outlineConnect=0;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.q;" vertex="1" parent="1">
@@ -108,7 +108,7 @@
         <mxCell id="s3" value="S3" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];html=1;fillColor=#7AA116;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;outlineConnect=0;fontSize=10;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;" vertex="1" parent="1">
           <mxGeometry x="1380" y="520" width="60" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="analytics_lbl" value="Kiro Analytics 用量看板 / usage dashboard（DB=kiro-user-report）" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fillColor=none;" vertex="1" parent="1">
+        <mxCell id="analytics_lbl" value="User Activity Report → S3 → Athena（DB=kiro_user_report，分区投影 / partition projection）" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;fillColor=none;" vertex="1" parent="1">
           <mxGeometry x="1460" y="535" width="240" height="40" as="geometry" />
         </mxCell>
 
@@ -188,7 +188,7 @@
         <mxCell id="e7" style="endArrow=classic;html=1;rounded=1;strokeColor=#D79B00;fontSize=10;strokeWidth=2;" edge="1" parent="1" source="b_prov" target="kiro">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e7lbl" value="5b. 订阅 / subscribe&#10;q:CreateAssignment" style="text;html=1;fontSize=10;fillColor=#ffffff;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="e7lbl" value="5b. 加入积分池 / join pool&#10;CreateAssignment(CREDIT_POOL)" style="text;html=1;fontSize=10;fillColor=#ffffff;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="905" y="380" width="150" height="28" as="geometry" />
         </mxCell>
 

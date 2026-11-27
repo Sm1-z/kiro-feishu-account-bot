@@ -231,6 +231,7 @@ from app.auth import issue_token
 
 print("ADMIN_TOKEN=" + issue_token("ou_demo_admin", "张三"), flush=True)
 print("USER_TOKEN=" + issue_token("ou_lisi", "李四"), flush=True)
+print("NEW_USER_TOKEN=" + issue_token("ou_wujiu", "吴九"), flush=True)  # 还没有账号的员工（截申请弹窗用）
 
 import uvicorn
 from app.main import app  # noqa: E402  (main import 放 patch 之后)

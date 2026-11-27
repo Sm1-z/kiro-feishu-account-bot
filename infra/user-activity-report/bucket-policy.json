@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "KiroLogsWrite",
+      "Effect": "Allow",
+      "Principal": { "Service": "q.amazonaws.com" },
+      "Action": ["s3:PutObject"],
+      "Resource": ["arn:aws:s3:::kiro-user-activity-ACCOUNT_ID/reports/*"],
+      "Condition": {
+        "StringEquals": { "aws:SourceAccount": "ACCOUNT_ID" },
+        "ArnLike": { "aws:SourceArn": "arn:aws:codewhisperer:REGION:ACCOUNT_ID:*" }
+      }
+    },
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::kiro-user-activity-ACCOUNT_ID",
+        "arn:aws:s3:::kiro-user-activity-ACCOUNT_ID/*"
+      ],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    }
+  ]
+}

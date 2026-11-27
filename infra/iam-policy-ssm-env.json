@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadBotEnvParameter",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/kiro-pool-bot/*"
+    },
+    {
+      "Sid": "DecryptViaSsm",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "kms:ViaService": "ssm.REGION.amazonaws.com" } }
+    }
+  ]
+}

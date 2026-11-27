@@ -79,7 +79,9 @@ backend/app/
 frontend/            React + TS + AntD（登录 / 我的账号 / 管理后台）
 infra/
 ├── iam-policy.json  运行角色策略
+├── iam-policy-ssm-env.json  可选：实例从 SSM 读取 .env 的权限
 ├── create_table.py  DynamoDB 建表脚本
+├── ec2/             EC2 启动脚本（user-data）+ systemd 服务 + 取 .env 脚本
 └── user-activity-report/   报表 S3 桶策略模板 + Athena 建表 SQL 模板
 backend/tests/       moto + mock 单元测试（116 项）
 ```
@@ -111,7 +113,8 @@ ADMIN_OPEN_IDS=ou_demo_admin python demo_server.py   # 输出 ADMIN_TOKEN / USER
 1. 建表：`python infra/create_table.py`
 2. 运行载体绑定 IAM Role，附加 `infra/iam-policy.json`
 3. （可选）用量报表：按 `infra/user-activity-report/` 建 S3 桶与 Athena 表，并在 Kiro 控制台 Controls 打开 CSV 报表
-4. 飞书应用、环境变量与端到端验证见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
+4. 云上部署：`infra/ec2/`（EC2 启动脚本 + systemd 服务，`.env` 走 SSM SecureString，不开公网入口）
+5. 飞书应用、环境变量与端到端验证见 [docs/DEPLOY-AND-VERIFY.md](docs/DEPLOY-AND-VERIFY.md)
 
 ## Disclaimer
 

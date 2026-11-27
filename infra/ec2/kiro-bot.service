@@ -1,0 +1,22 @@
+# Kiro 积分池 bot 的 systemd 服务（由 infra/ec2/user-data.sh 安装到 /etc/systemd/system/）
+# 只监听 127.0.0.1；对外访问走 SSM 端口转发（测试）或同机 HTTPS 反向代理 / ALB（正式）。
+# /etc/kiro-bot.conf 提供 AWS_REGION 与 KIRO_ENV_PARAM（.env 所在的 SSM SecureString 参数名）。
+[Unit]
+Description=Kiro credit pool bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kiro
+WorkingDirectory=/opt/kiro-bot/app/backend
+EnvironmentFile=/etc/kiro-bot.conf
+# 「+」= 以 root 执行：从 SSM 取 .env 写到工作目录（600，属主 kiro）
+ExecStartPre=+/usr/local/bin/kiro-bot-fetch-env.sh
+ExecStart=/opt/kiro-bot/app/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

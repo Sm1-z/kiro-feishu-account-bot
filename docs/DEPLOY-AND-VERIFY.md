@@ -21,6 +21,9 @@
 | 登录回调 400「登录状态校验失败」 | 回调里的 state 与浏览器 cookie 不一致（防登录 CSRF） | 从登录页重新点「飞书登录」；不要直接复用旧的回调链接 |
 | 申请提交报 **99992351 id not exist** | `ADMIN_OPEN_IDS` 还是占位符 | 登录后从 `/api/auth/me` 取真实 `ou_` open_id 回填 `.env` 重启（open_id 按应用区分，换应用要重取） |
 | 用量列一直是 — | 用量报表未配置，或当天还没有报表 | 见 1.4；报表每天 02:00 UTC 写入，只包含前一天用过 Kiro 的人 |
+| EC2 上 `pip install` 失败，或启动报 `TypeError: unsupported operand type(s) for \|` | Amazon Linux 2023 自带的 `python3` 是 3.9，代码需要 3.10+ | 装 `python3.12`（`infra/ec2/user-data.sh` 已处理） |
+| 卡片回调时好时坏，部分点击没反应 | 同一个飞书应用同时有两个 bot 在线（例如本地 + 云上），回调会随机分给其中一个 | 同一时间只保留一个实例在线 |
+| EC2 上服务起不来，日志里取 .env 报 AccessDenied | 实例角色缺 `ssm:GetParameter` / `kms:Decrypt` | 附加 `infra/iam-policy-ssm-env.json`（替换 REGION / ACCOUNT_ID） |
 
 ---
 
@@ -135,6 +138,57 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000   # 只监听本机
 - [ ] 验证：日志出现 `connected to wss://msg-frontier.feishu.cn`
 - [ ] 验证：`curl 127.0.0.1:8000/api/health` → `{"status":"ok"}`
 - [ ] 验证：浏览器打开平台地址看到登录页
+
+### 3.3 云上部署（EC2，不开公网入口）
+
+已在 Amazon Linux 2023 / t4g.small 上实测。安全组不开任何入站端口；飞书回调走长连接（出站），测试访问走 SSM 端口转发，正式对外再加 HTTPS 入口（见 3.4）。
+
+1. **`.env` 放进 SSM SecureString**（不要写进 user-data，user-data 是明文可读的）：
+   ```bash
+   aws ssm put-parameter --name /kiro-pool-bot/env --type SecureString --value file://.env
+   ```
+2. **实例角色**：信任 `ec2.amazonaws.com`；附加 `infra/iam-policy.json`（运行权限）、`infra/iam-policy-ssm-env.json`（读上面的参数，替换 REGION / ACCOUNT_ID）、
+   托管策略 `AmazonSSMManagedInstanceCore`（SSM 运维与端口转发）；建 instance profile
+3. **安全组**：不加任何入站规则（出站默认全开：飞书长连接、Kiro / AWS API、拉代码与依赖）
+4. **启动实例**：
+   ```bash
+   aws ec2 run-instances --image-id <AL2023 AMI> --instance-type t4g.small --subnet-id <子网> \
+     --security-group-ids <上一步的 SG> --iam-instance-profile Name=<instance profile> \
+     --metadata-options HttpTokens=required,HttpPutResponseHopLimit=1 \
+     --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":16,"VolumeType":"gp3","Encrypted":true}}]' \
+     --user-data file://infra/ec2/user-data.sh
+   ```
+   - 强制 IMDSv2；磁盘显式加密（有的账号默认不加密）；不配 SSH 密钥，运维只走 SSM
+   - `infra/ec2/user-data.sh` 开头 4 个变量改成自己的（仓库地址、分支、Region、参数名）；约 2 分钟装完依赖、构建前端并启动服务
+   - 服务定义 `infra/ec2/kiro-bot.service`：专用账号 `kiro` 运行、只监听 127.0.0.1:8000、启动前从 SSM 取 `.env`（600）、挂了自动重启
+5. **验证**（SSM Run Command 或 Session Manager）：
+   ```bash
+   systemctl is-active kiro-bot
+   curl -s 127.0.0.1:8000/api/health             # {"status":"ok"}
+   ss -ltn | grep :8000                           # 只应看到 127.0.0.1:8000
+   journalctl -u kiro-bot | grep 'connected to wss'
+   ```
+6. **测试访问**：本机开 SSM 端口转发，浏览器打开 `http://localhost:8000`（飞书重定向 URL 可以继续用 localhost 那条）：
+   ```bash
+   aws ssm start-session --target <实例 ID> --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}'
+   ```
+   > 同一个飞书应用只能有一个 bot 在线：云上起来之前先停掉本地 / 其它实例。
+7. **更新代码**：
+   ```bash
+   sudo -u kiro git -C /opt/kiro-bot/app pull
+   cd /opt/kiro-bot/app/frontend && sudo -u kiro npm ci && sudo -u kiro npm run build
+   cd ../backend && sudo -u kiro .venv/bin/pip install -q -r requirements.txt && sudo systemctl restart kiro-bot
+   ```
+   改了 `.env` 的话更新 SSM 参数后 `systemctl restart kiro-bot` 即可。
+
+> 参考成本：t4g.small + 16 GB gp3 + 公网 IPv4 约 $15 / 月；不用时可以停机（只收磁盘费）。
+
+### 3.4 正式对外访问（需要客户先做决定）
+
+员工要从自己的浏览器访问时，加一个 HTTPS 入口：ALB + ACM 证书（或同机 nginx / Caddy）把 443 转到实例的 127.0.0.1:8000，
+安全组只放行公司出口 IP / VPN 网段到 443；不要开放 8000，也不要用 `--host 0.0.0.0`。
+飞书后台的重定向 URL、网页应用主页和 `.env` 里的 `FEISHU_REDIRECT_URI` / `FRONTEND_URL` 同步改成 HTTPS 域名。
 
 ---
 
